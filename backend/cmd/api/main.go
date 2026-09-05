@@ -11,11 +11,15 @@ import (
 	"github.com/wanglei-123-wl/ika6server/backend/internal/admin"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/audit"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/auth"
+	"github.com/wanglei-123-wl/ika6server/backend/internal/blocklist"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/categories"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/config"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/database"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/files"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/posts"
+	"github.com/wanglei-123-wl/ika6server/backend/internal/reputation"
+	"github.com/wanglei-123-wl/ika6server/backend/internal/sandbox"
+	"github.com/wanglei-123-wl/ika6server/backend/internal/scanner"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/search"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/users"
 )
@@ -28,6 +32,8 @@ type app struct {
 	posts      *posts.Store
 	files      *files.Store
 	audit      *audit.Service
+	blocklist  *blocklist.Store
+	reputation *reputation.Store
 	httpServer *http.Server
 }
 
@@ -42,14 +48,24 @@ func main() {
 
 	userStore := users.NewStore()
 	postStore := posts.NewStore()
+	blocklistStore := blocklist.NewStore()
+	reputationStore := reputation.NewStore()
 	application := &app{
 		config:   cfg,
 		database: db,
 		users:    userStore,
 		auth:     auth.NewService(userStore, cfg.TokenSecret),
 		posts:    postStore,
-		files:    files.NewStore(cfg.UploadDir),
-		audit:    audit.NewService(postStore),
+		files: files.NewStore(cfg.UploadDir, cfg.TempDir, scanner.New(scanner.Config{
+			ClamScanBin: cfg.ClamScanBin,
+			ClamAVDBDir: cfg.ClamAVDBDir,
+			SevenZipBin: cfg.SevenZipBin,
+			YaraBin:     cfg.YaraBin,
+			YaraRules:   cfg.YaraRules,
+		}), sandbox.NewAnalyzer(), blocklistStore),
+		audit:      audit.NewService(postStore),
+		blocklist:  blocklistStore,
+		reputation: reputationStore,
 	}
 
 	mux := http.NewServeMux()
@@ -71,6 +87,7 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/register", a.handleRegister)
 	mux.HandleFunc("POST /api/auth/login", a.handleLogin)
 	mux.HandleFunc("GET /api/users/me", a.handleMe)
+	mux.HandleFunc("GET /api/users/me/reputation", a.handleMyReputation)
 	mux.HandleFunc("GET /api/categories", a.handleCategories)
 	mux.HandleFunc("GET /api/posts", a.handleListPosts)
 	mux.HandleFunc("POST /api/posts", a.handleCreatePost)
@@ -79,6 +96,9 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/posts/{id}/download", a.handleDownloadFile)
 	mux.HandleFunc("POST /api/admin/posts/{id}/approve", a.handleApprovePost)
 	mux.HandleFunc("POST /api/admin/posts/{id}/reject", a.handleRejectPost)
+	mux.HandleFunc("GET /api/admin/blocklist", a.handleListBlocklist)
+	mux.HandleFunc("POST /api/admin/blocklist", a.handleAddBlocklist)
+	mux.HandleFunc("GET /api/admin/reputation", a.handleListReputation)
 }
 
 func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -110,10 +130,24 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.reputation.Add(user.ID, reputation.EventRegister, 5, "registered account")
+
 	writeJSON(w, http.StatusCreated, response{
 		"ok":    true,
 		"user":  user,
 		"token": token,
+	})
+}
+
+func (a *app) handleMyReputation(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{
+		"ok":         true,
+		"reputation": a.reputation.Get(user.ID),
 	})
 }
 
@@ -234,11 +268,13 @@ func (a *app) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = src.Close()
 
-	file, err := a.files.Save(postID, header)
+	file, err := a.files.Save(r.Context(), postID, header)
 	if err != nil {
+		a.reputation.Add(user.ID, reputation.EventUploadRejected, -20, err.Error())
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	a.reputation.Add(user.ID, reputation.EventUploadClean, 10, "uploaded file passed scanning")
 
 	writeJSON(w, http.StatusCreated, response{
 		"ok":   true,
@@ -263,11 +299,16 @@ func (a *app) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
+	if entry, blocked := a.blocklist.Contains(file.SHA256); blocked {
+		writeError(w, http.StatusForbidden, "download blocked: "+entry.Reason)
+		return
+	}
 
 	if _, err := a.posts.AddDownload(postID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	a.reputation.Add(post.AuthorID, reputation.EventDownload, 1, "source file downloaded")
 
 	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeHeader(file.OriginalName)+`"`)
 	http.ServeFile(w, r, filePath)
@@ -314,6 +355,59 @@ func (a *app) auditPost(w http.ResponseWriter, r *http.Request, approved bool) {
 		"ok":   true,
 		"item": post,
 	})
+	if approved {
+		a.reputation.Add(post.AuthorID, reputation.EventPostApproved, 20, "post approved")
+	} else {
+		a.reputation.Add(post.AuthorID, reputation.EventPostRejected, -30, "post rejected")
+	}
+}
+
+func (a *app) handleListBlocklist(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.currentAdmin(w, r); !ok {
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{
+		"ok":    true,
+		"items": a.blocklist.List(),
+	})
+}
+
+func (a *app) handleAddBlocklist(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentAdmin(w, r)
+	if !ok {
+		return
+	}
+
+	var input struct {
+		SHA256 string `json:"sha256"`
+		Reason string `json:"reason"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+
+	entry, err := a.blocklist.Add(input.SHA256, input.Reason, user.ID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, response{
+		"ok":    true,
+		"entry": entry,
+	})
+}
+
+func (a *app) handleListReputation(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.currentAdmin(w, r); !ok {
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{
+		"ok":    true,
+		"items": a.reputation.List(),
+	})
 }
 
 func (a *app) currentUser(w http.ResponseWriter, r *http.Request) (users.User, bool) {
@@ -336,6 +430,18 @@ func (a *app) currentUser(w http.ResponseWriter, r *http.Request) (users.User, b
 		return users.User{}, false
 	}
 
+	return user, true
+}
+
+func (a *app) currentAdmin(w http.ResponseWriter, r *http.Request) (users.User, bool) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return users.User{}, false
+	}
+	if !admin.CanManage(user) {
+		writeError(w, http.StatusForbidden, "admin role required")
+		return users.User{}, false
+	}
 	return user, true
 }
 
