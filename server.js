@@ -1,8 +1,12 @@
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { URL } = require('url');
 
 const port = process.env.PORT ? Number(process.env.PORT) : 3000;
-const host = process.env.HOST || '127.0.0.1';
+const host = process.env.HOST || '0.0.0.0';
+const frontendDist = path.join(__dirname, 'frontend', 'dist');
 
 function send(res, statusCode, body, headers = {}) {
   res.writeHead(statusCode, {
@@ -21,6 +25,33 @@ function json(res, statusCode, data) {
   res.end(JSON.stringify(data, null, 2));
 }
 
+function sendFile(res, filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const contentTypes = {
+    '.css': 'text/css; charset=utf-8',
+    '.html': 'text/html; charset=utf-8',
+    '.js': 'text/javascript; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.svg': 'image/svg+xml',
+  };
+
+  fs.readFile(filePath, (error, content) => {
+    if (error) {
+      json(res, 404, {
+        ok: false,
+        error: 'not_found',
+      });
+      return;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': contentTypes[ext] || 'application/octet-stream',
+      'Cache-Control': 'no-store',
+    });
+    res.end(content);
+  });
+}
+
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -36,7 +67,14 @@ const samplePosts = [
   { id: 3, title: '上传审核队列', author: 'system', downloads: 12, updatedAt: '2026-09-04 16:10' },
 ];
 
-function renderHomePage(baseUrl) {
+function getLanUrls() {
+  return Object.values(os.networkInterfaces())
+    .flat()
+    .filter((item) => item && item.family === 'IPv4' && !item.internal)
+    .map((item) => `http://${item.address}:${port}`);
+}
+
+function renderHomePage(baseUrl, lanUrls) {
   const rows = samplePosts
     .map(
       (post) => `
@@ -157,6 +195,14 @@ function renderHomePage(baseUrl) {
         color: var(--muted);
         font-size: 13px;
       }
+      .url-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
       code {
         background: #eef3ff;
         padding: 2px 6px;
@@ -172,7 +218,10 @@ function renderHomePage(baseUrl) {
       <div class="hero">
         <h1 class="title">ika6server 后台入口 <span class="badge">running</span></h1>
         <p class="subtitle">这是你现在可以直接在浏览器里打开的本地可视化入口。后面我们会在这个基础上继续加用户、帖子、文件和审核模块。</p>
-        <p class="subtitle">当前服务地址：<code>${escapeHtml(baseUrl)}</code></p>
+        <p class="subtitle">本机服务地址：<code>${escapeHtml(baseUrl)}</code></p>
+        <ul class="url-list">
+          ${lanUrls.map((url) => `<li><code>${escapeHtml(url)}</code></li>`).join('')}
+        </ul>
       </div>
 
       <div class="grid">
@@ -230,8 +279,19 @@ function renderHomePage(baseUrl) {
 const server = http.createServer((req, res) => {
   const requestUrl = new URL(req.url, `http://${req.headers.host || `${host}:${port}`}`);
 
+  if (requestUrl.pathname.startsWith('/assets/')) {
+    sendFile(res, path.join(frontendDist, requestUrl.pathname));
+    return;
+  }
+
   if (requestUrl.pathname === '/' || requestUrl.pathname === '/dashboard') {
-    send(res, 200, renderHomePage(`http://${host}:${port}`));
+    const indexPath = path.join(frontendDist, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      sendFile(res, indexPath);
+      return;
+    }
+
+    send(res, 200, renderHomePage(`http://127.0.0.1:${port}`, getLanUrls()));
     return;
   }
 
@@ -260,5 +320,6 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`Server is running at http://${host}:${port}`);
+  console.log(`Server is running at http://127.0.0.1:${port}`);
+  getLanUrls().forEach((url) => console.log(`LAN access: ${url}`));
 });
