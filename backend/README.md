@@ -27,6 +27,8 @@ go run .\cmd\api
 ```text
 IKA6_ADDR=0.0.0.0:8080
 IKA6_DATABASE_URL=postgres://user:password@localhost:5432/ika6
+IKA6_MIGRATIONS_DIR=F:\ika6server\backend\migrations
+IKA6_BOOTSTRAP_ADMIN_ACCOUNT=admin@example.com
 IKA6_UPLOAD_DIR=F:\ika6server\storage\uploads
 IKA6_TEMP_DIR=F:\ika6server\storage\tmp
 IKA6_TOKEN_SECRET=change-me
@@ -36,6 +38,24 @@ IKA6_7ZIP_BIN=C:\Program Files\7-Zip\7z.exe
 IKA6_YARA_BIN=C:\Users\Administrator\AppData\Local\Microsoft\WinGet\Packages\VirusTotal.YARA_Microsoft.Winget.Source_8wekyb3d8bbwe\yara64.exe
 IKA6_YARA_RULES=F:\ika6server\deployments\yara\source_rules.yar
 ```
+
+## Database Migration
+
+With PostgreSQL available, run:
+
+```powershell
+docker compose -f .\docker-compose.postgres.yml up -d
+$env:IKA6_DATABASE_URL="postgres://ika6:ika6-local-password@localhost:5432/ika6"
+go run .\cmd\migrate
+```
+
+The API also applies pending migrations during startup when `IKA6_DATABASE_URL` is configured. The PostgreSQL integration test is skipped when that variable is absent:
+
+```powershell
+go test .\internal\database -run TestPostgresIntegration
+```
+
+The Compose file is only a local verification environment; it is not started by the API.
 
 ## Current Status
 
