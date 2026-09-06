@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import AppModal from './components/AppModal.vue';
+import AuthModal from './components/AuthModal.vue';
 import GameCard from './components/GameCard.vue';
 import PostItem from './components/PostItem.vue';
 import { bars, devDocs, games, posts as seedPosts, repos } from './data/mock';
@@ -19,11 +20,14 @@ const activeForumCat = ref('全部');
 const activeBar = ref(bars[0]);
 const activeDocKey = ref('quickstart');
 const uploadOpen = ref(false);
+const authOpen = ref(false);
+const accountMenuOpen = ref(false);
 const playerOpen = ref(false);
 const currentGame = ref(games[0]);
 const toast = ref('');
 const postList = ref(seedPosts.map((post) => ({ ...post })));
 const theme = ref('dark');
+const currentUser = ref(null);
 
 const forumCats = ['全部', '精华', '互助', '作品发布', '招募', '源码分享', '灌水'];
 const currentDoc = computed(() => devDocs[activeDocKey.value]);
@@ -61,6 +65,42 @@ function submitUpload() {
   showToast('游戏已提交，等待自动部署');
 }
 
+function openAuth() {
+  accountMenuOpen.value = false;
+  authOpen.value = true;
+}
+
+function handleAuthenticated(user) {
+  currentUser.value = user;
+  if (user.remember !== false) window.localStorage.setItem('pf_user', JSON.stringify(user));
+  authOpen.value = false;
+  showToast(user.method === '注册' ? `注册成功，欢迎加入 ${user.name}` : `欢迎回来，${user.name}`);
+}
+
+function toggleAccountMenu() {
+  if (!currentUser.value) {
+    openAuth();
+    return;
+  }
+  accountMenuOpen.value = !accountMenuOpen.value;
+}
+
+function logout() {
+  currentUser.value = null;
+  accountMenuOpen.value = false;
+  window.localStorage.removeItem('pf_user');
+  showToast('已退出登录');
+}
+
+function accountAction(label) {
+  accountMenuOpen.value = false;
+  showToast(`${label}功能即将开放`);
+}
+
+function closeAccountMenu(event) {
+  if (!event.target.closest('.account-wrap')) accountMenuOpen.value = false;
+}
+
 function toggleTheme() {
   theme.value = theme.value === 'dark' ? 'light' : 'dark';
   window.localStorage.setItem('pixel-forge-theme', theme.value);
@@ -69,20 +109,30 @@ function toggleTheme() {
 function onKeydown(event) {
   if (event.key === 'Escape') {
     uploadOpen.value = false;
+    authOpen.value = false;
+    accountMenuOpen.value = false;
     playerOpen.value = false;
   }
 }
 
 onMounted(() => {
   theme.value = window.localStorage.getItem('pixel-forge-theme') || 'dark';
+  try {
+    const saved = JSON.parse(window.localStorage.getItem('pf_user') || 'null');
+    if (saved?.name) currentUser.value = saved;
+  } catch {
+    currentUser.value = null;
+  }
   route();
   window.addEventListener('hashchange', route);
   window.addEventListener('keydown', onKeydown);
+  window.addEventListener('click', closeAccountMenu);
 });
 
 onUnmounted(() => {
   window.removeEventListener('hashchange', route);
   window.removeEventListener('keydown', onKeydown);
+  window.removeEventListener('click', closeAccountMenu);
 });
 </script>
 
@@ -108,8 +158,26 @@ onUnmounted(() => {
           <span class="theme-icon">{{ theme === 'dark' ? '☀' : '☾' }}</span>
           <span class="theme-label">{{ theme === 'dark' ? '浅色' : '深色' }}</span>
         </button>
+        <button v-if="!currentUser" class="btn btn-ghost login-btn" @click="openAuth">登录 / 注册</button>
         <button class="btn btn-primary" @click="uploadOpen = true">发布游戏</button>
-        <div class="avatar">IK</div>
+        <div class="account-wrap">
+          <button class="avatar account-avatar" :title="currentUser ? currentUser.name : '点击登录'" @click.stop="toggleAccountMenu">{{ currentUser?.initial || 'L' }}</button>
+          <div v-if="accountMenuOpen" class="account-menu" @click.stop>
+            <div class="account-head">
+              <div class="account-large-avatar">{{ currentUser?.initial }}</div>
+              <div><div class="account-name">{{ currentUser?.name }} <span>{{ currentUser?.level }}</span></div><div class="account-method">{{ currentUser?.method }}登录 · 在线</div></div>
+            </div>
+            <div class="account-list">
+              <div class="account-section">我的空间</div>
+              <button class="account-item" @click="accountAction('我的创作')">我的创作 <span>›</span></button>
+              <button class="account-item" @click="accountAction('我的帖子')">我的帖子 <span>›</span></button>
+              <button class="account-item" @click="accountAction('我的收藏')">我的收藏 <span>›</span></button>
+              <div class="account-section">账户</div>
+              <button class="account-item" @click="accountAction('个人设置')">个人设置 <span>›</span></button>
+              <button class="account-item account-logout" @click="logout">退出登录</button>
+            </div>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -291,6 +359,8 @@ onUnmounted(() => {
       <div class="drop-zone"><div class="ico">⇧</div><div class="t">拖入文件 或 点击选择</div><div class="s">最大 500 MB · 自动部署到 CDN</div></div>
       <div class="field"><label>开源协议</label><select><option>MIT</option><option>Apache 2.0</option><option>GPL v3</option><option>CC0</option></select></div>
     </AppModal>
+
+    <AuthModal :show="authOpen" @close="authOpen = false" @authenticated="handleAuthenticated" @notice="showToast" />
 
     <div v-if="playerOpen" class="player-overlay" @click.self="playerOpen = false">
       <div class="player-window">
