@@ -301,6 +301,129 @@ button {
   font-weight: 800;
 }
 
+.login-btn {
+  min-height: 38px;
+}
+
+.account-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.account-avatar {
+  border: 2px solid transparent;
+  transition: 0.2s ease;
+}
+
+.account-avatar:hover {
+  border-color: var(--primary);
+  transform: scale(1.05);
+}
+
+.account-menu {
+  position: absolute;
+  top: calc(100% + 12px);
+  right: 0;
+  z-index: 70;
+  width: 286px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: var(--bg-2);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.42), var(--shadow-glow);
+}
+
+.account-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 16%, transparent), color-mix(in srgb, var(--accent) 8%, transparent));
+}
+
+.account-large-avatar {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 14px;
+  background: var(--gradient-1);
+  color: white;
+  font-size: 19px;
+  font-weight: 900;
+}
+
+.account-name {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.account-name span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font: 700 10px "JetBrains Mono", monospace;
+}
+
+.account-method {
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.account-list {
+  padding: 8px;
+}
+
+.account-section {
+  padding: 8px 10px 4px;
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.account-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 10px;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 13px;
+  text-align: left;
+}
+
+.account-item:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.account-item span {
+  color: var(--text-3);
+  font-size: 18px;
+}
+
+.account-item.account-logout {
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 9px 9px;
+  color: #f87171;
+}
+
+.account-item.account-logout:hover {
+  background: rgba(248, 113, 113, 0.1);
+}
+
 .theme-toggle {
   display: inline-flex;
   align-items: center;
@@ -1146,6 +1269,232 @@ button {
   padding: 18px;
 }
 
+.auth-modal {
+  width: min(430px, 100%);
+}
+
+.auth-body {
+  gap: 18px;
+}
+
+.auth-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-1);
+}
+
+.auth-tab {
+  padding: 10px;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.auth-tab.active {
+  background: var(--gradient-1);
+  color: white;
+  box-shadow: 0 4px 16px rgba(139, 92, 246, 0.3);
+}
+
+.auth-pane {
+  display: grid;
+  gap: 14px;
+}
+
+.auth-field {
+  display: grid;
+  gap: 6px;
+}
+
+.auth-field label {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.auth-input-wrap {
+  position: relative;
+}
+
+.auth-input {
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  outline: none;
+  background: var(--bg-1);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.auth-input-wrap .auth-input {
+  padding-right: 56px;
+}
+
+.auth-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+}
+
+.auth-field.invalid .auth-input {
+  border-color: #f87171;
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.12);
+}
+
+.auth-error {
+  color: #f87171;
+  font-size: 11px;
+}
+
+.auth-eye {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  min-width: 42px;
+  padding: 5px 6px;
+  transform: translateY(-50%);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.auth-eye:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.auth-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.auth-check {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.auth-check input {
+  accent-color: var(--primary);
+}
+
+.auth-agree {
+  flex-wrap: wrap;
+  line-height: 1.7;
+}
+
+.auth-link {
+  padding: 0;
+  background: transparent;
+  color: var(--primary);
+  font-size: inherit;
+}
+
+.auth-link:hover {
+  color: var(--accent);
+}
+
+.auth-submit {
+  width: 100%;
+  justify-content: center;
+  padding: 13px !important;
+  font-size: 15px;
+}
+
+.auth-submit:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: var(--border);
+}
+
+.social-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.social-btn {
+  display: grid;
+  gap: 4px;
+  place-items: center;
+  padding: 9px 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.social-btn:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+.social-icon {
+  color: var(--accent);
+  font-size: 16px;
+  font-weight: 900;
+}
+
+.auth-hint,
+.auth-tip {
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+.auth-tip {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.auth-spinner {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  margin-right: 7px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: auth-spin 0.7s linear infinite;
+}
+
+@keyframes auth-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .field {
   display: grid;
   gap: 7px;
@@ -1341,6 +1690,18 @@ button {
     order: 2;
     width: 100%;
     overflow-x: auto;
+  }
+
+  .login-btn {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+
+  .account-menu {
+    position: fixed;
+    top: 68px;
+    right: 14px;
+    width: min(286px, calc(100vw - 28px));
   }
 
   .brand-logo {
