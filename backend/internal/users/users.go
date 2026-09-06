@@ -15,26 +15,45 @@ const (
 )
 
 type User struct {
-	ID           int64     `json:"id"`
-	Username     string    `json:"username"`
-	Email        string    `json:"email"`
-	Role         Role      `json:"role"`
-	PasswordHash string    `json:"-"`
-	CreatedAt    time.Time `json:"createdAt"`
+	ID           int64      `json:"id"`
+	Username     string     `json:"username"`
+	Email        string     `json:"email"`
+	Role         Role       `json:"role"`
+	PasswordHash string     `json:"-"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	BannedUntil  *time.Time `json:"bannedUntil,omitempty"`
+	BanReason    string     `json:"banReason,omitempty"`
+}
+
+type Repository interface {
+	Create(username, email, passwordHash string) (User, error)
+	FindByEmail(email string) (User, bool)
+	FindByID(id int64) (User, bool)
+	Ban(id int64, until time.Time, reason string) (User, error)
+	IsBanned(user User, now time.Time) bool
+	Counts(now time.Time) (total, active int)
 }
 
 type Store struct {
-	mu      sync.RWMutex
-	nextID  int64
-	byID    map[int64]User
-	byEmail map[string]int64
+	mu                  sync.RWMutex
+	nextID              int64
+	byID                map[int64]User
+	byEmail             map[string]int64
+	bootstrapAdminEmail string
 }
 
+var _ Repository = (*Store)(nil)
+
 func NewStore() *Store {
+	return NewStoreWithAdmin("")
+}
+
+func NewStoreWithAdmin(email string) *Store {
 	return &Store{
-		nextID:  1,
-		byID:    make(map[int64]User),
-		byEmail: make(map[string]int64),
+		nextID:              1,
+		byID:                make(map[int64]User),
+		byEmail:             make(map[string]int64),
+		bootstrapAdminEmail: strings.ToLower(strings.TrimSpace(email)),
 	}
 }
 
@@ -60,7 +79,7 @@ func (s *Store) Create(username, email, passwordHash string) (User, error) {
 		PasswordHash: passwordHash,
 		CreatedAt:    time.Now().UTC(),
 	}
-	if len(s.byID) == 0 {
+	if email == s.bootstrapAdminEmail && s.bootstrapAdminEmail != "" {
 		user.Role = RoleAdmin
 	}
 	s.nextID++
@@ -88,4 +107,34 @@ func (s *Store) FindByID(id int64) (User, bool) {
 
 	user, ok := s.byID[id]
 	return user, ok
+}
+
+func (s *Store) Ban(id int64, until time.Time, reason string) (User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.byID[id]
+	if !ok {
+		return User{}, errors.New("user not found")
+	}
+	until = until.UTC()
+	user.BannedUntil = &until
+	user.BanReason = strings.TrimSpace(reason)
+	s.byID[id] = user
+	return user, nil
+}
+
+func (s *Store) IsBanned(user User, now time.Time) bool {
+	return user.BannedUntil != nil && now.UTC().Before(*user.BannedUntil)
+}
+
+func (s *Store) Counts(now time.Time) (total, active int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, user := range s.byID {
+		total++
+		if !s.IsBanned(user, now) {
+			active++
+		}
+	}
+	return total, active
 }

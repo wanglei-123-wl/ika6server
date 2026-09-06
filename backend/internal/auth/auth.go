@@ -19,11 +19,11 @@ import (
 const passwordIterations = 210000
 
 type Service struct {
-	users       *users.Store
+	users       users.Repository
 	tokenSecret []byte
 }
 
-func NewService(store *users.Store, tokenSecret string) *Service {
+func NewService(store users.Repository, tokenSecret string) *Service {
 	return &Service{
 		users:       store,
 		tokenSecret: []byte(tokenSecret),
@@ -50,22 +50,40 @@ func (s *Service) Register(username, email, password string) (users.User, string
 }
 
 func (s *Service) Login(email, password string) (users.User, string, error) {
+	return s.LoginWithRemember(email, password, false)
+}
+
+func (s *Service) LoginWithRemember(email, password string, remember bool) (users.User, string, error) {
 	user, ok := s.users.FindByEmail(email)
 	if !ok || !CheckPassword(password, user.PasswordHash) {
 		return users.User{}, "", errors.New("invalid email or password")
 	}
 
-	token := s.SignToken(user.ID)
+	token := s.SignTokenWithTTL(user.ID, tokenTTL(remember))
 	return user, token, nil
 }
 
 func (s *Service) SignToken(userID int64) string {
-	exp := time.Now().UTC().Add(24 * time.Hour).Unix()
+	return s.SignTokenWithTTL(userID, 24*time.Hour)
+}
+
+func (s *Service) SignTokenWithTTL(userID int64, ttl time.Duration) string {
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	exp := time.Now().UTC().Add(ttl).Unix()
 	payload := fmt.Sprintf("%d.%d", userID, exp)
 	mac := hmac.New(sha256.New, s.tokenSecret)
 	mac.Write([]byte(payload))
 	signature := hex.EncodeToString(mac.Sum(nil))
 	return base64.RawURLEncoding.EncodeToString([]byte(payload + "." + signature))
+}
+
+func tokenTTL(remember bool) time.Duration {
+	if remember {
+		return 30 * 24 * time.Hour
+	}
+	return 24 * time.Hour
 }
 
 func (s *Service) ParseToken(token string) (int64, error) {
