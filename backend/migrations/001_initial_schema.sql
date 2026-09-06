@@ -25,6 +25,9 @@ CREATE TABLE source_files (
   original_name TEXT NOT NULL,
   stored_name TEXT NOT NULL,
   size BIGINT NOT NULL,
+  sha256 TEXT NOT NULL DEFAULT '',
+  scan_result JSONB NOT NULL DEFAULT '{}'::jsonb,
+  sandbox_report JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -33,5 +36,21 @@ CREATE TABLE comments (
   post_id BIGINT NOT NULL REFERENCES posts(id),
   author_id BIGINT NOT NULL REFERENCES users(id),
   content TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE download_blocklist (
+  sha256 TEXT PRIMARY KEY,
+  reason TEXT NOT NULL,
+  created_by BIGINT NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE reputation_events (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id),
+  event_type TEXT NOT NULL,
+  delta INTEGER NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

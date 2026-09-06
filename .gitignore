@@ -17,3 +17,5 @@ storage/uploads/*
 !storage/uploads/.gitkeep
 storage/tmp/*
 !storage/tmp/.gitkeep
+storage/clamav-db/*
+!storage/clamav-db/.gitkeep
