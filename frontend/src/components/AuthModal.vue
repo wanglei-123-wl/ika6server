@@ -1,5 +1,6 @@
 <script setup>
 import { ref, watch } from 'vue';
+import { useAuthStore } from '../stores/authStore';
 
 const props = defineProps({
   show: {
@@ -13,6 +14,7 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['close', 'authenticated', 'notice']);
+const authStore = useAuthStore();
 
 const tab = ref('login');
 const loginAccount = ref('');
@@ -62,7 +64,7 @@ function isValidAccount(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) || /^1[3-9]\d{9}$/.test(value);
 }
 
-function submitLogin() {
+async function submitLogin() {
   const nextErrors = {};
   const account = loginAccount.value.trim();
 
@@ -73,20 +75,21 @@ function submitLogin() {
   if (Object.keys(nextErrors).length || loading.value) return;
 
   loading.value = true;
-  window.setTimeout(() => {
-    const name = account.includes('@') ? account.split('@')[0] : account.slice(-4);
-    emit('authenticated', {
-      name: name || 'Luna',
-      initial: (name || 'Luna').charAt(0).toUpperCase(),
-      level: 'lv7',
-      method: '邮箱',
+  try {
+    const result = await authStore.loginWithPassword({
+      account,
+      password: loginPassword.value,
       remember: rememberMe.value,
     });
+    emit('authenticated', result.user);
+  } catch (error) {
+    emit('notice', error.message || '登录失败，请稍后重试');
+  } finally {
     loading.value = false;
-  }, 700);
+  }
 }
 
-function submitRegister() {
+async function submitRegister() {
   const nextErrors = {};
   const name = registerName.value.trim();
   const account = registerAccount.value.trim();
@@ -104,29 +107,32 @@ function submitRegister() {
   if (Object.keys(nextErrors).length || loading.value) return;
 
   loading.value = true;
-  window.setTimeout(() => {
-    emit('authenticated', {
+  try {
+    const result = await authStore.registerAccount({
       name,
-      initial: name.charAt(0).toUpperCase(),
-      level: 'lv1',
-      method: '注册',
-      remember: true,
+      account,
+      password: registerPassword.value,
     });
+    emit('authenticated', result.user);
+  } catch (error) {
+    emit('notice', error.message || '注册失败，请稍后重试');
+  } finally {
     loading.value = false;
-  }, 700);
+  }
 }
 
-function socialLogin(provider) {
+async function socialLogin(provider) {
   if (loading.value) return;
-  const names = { GitHub: 'quietforge', Google: 'stargazer', 微信: 'pixelwitch', QQ: 'mossybyte' };
-  const name = names[provider] || 'player';
-  emit('authenticated', {
-    name,
-    initial: name.charAt(0).toUpperCase(),
-    level: 'lv5',
-    method: provider,
-    remember: true,
-  });
+  loading.value = true;
+
+  try {
+    const result = await authStore.loginWithProvider(provider);
+    emit('authenticated', result.user);
+  } catch (error) {
+    emit('notice', error.message || `${provider} 登录失败`);
+  } finally {
+    loading.value = false;
+  }
 }
 </script>
 
