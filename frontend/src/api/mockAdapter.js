@@ -34,6 +34,8 @@ let repoItems = repos.map((repo, index) => ({
   author: repo.name.split('-')[0],
 }));
 
+const replyItems = new Map();
+
 const wait = (ms = 220) => new Promise((resolve) => window.setTimeout(resolve, ms));
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const getActor = () => sessionUser || currentUser;
@@ -256,36 +258,53 @@ export async function mockLikePost(id) {
 
 export async function mockGetReplies(postId, params = {}) {
   await wait();
-  const actor = getActor();
-  return paginate([
-    {
-      id: 1,
-      postId,
-      author: actor.name,
-      avatarText: actor.initial,
-      floor: 2,
-      content: '这个楼层后面会从真实评论接口读取。',
-      createdAt: '刚刚',
-      likes: 0,
-      liked: false,
-    },
-  ], params);
+  return paginate(replyItems.get(String(postId)) || [], params);
 }
 
 export async function mockCreateReply(postId, payload) {
   await wait();
   const actor = getActor();
-  return clone({
+  const key = String(postId);
+  const items = replyItems.get(key) || [];
+  const reply = {
     id: Date.now(),
-    postId,
+    postId: Number(postId),
     author: actor.name,
     avatarText: actor.initial,
-    floor: 2,
+    floor: items.length + 2,
     content: payload.content,
     createdAt: '刚刚',
     likes: 0,
     liked: false,
-  });
+  };
+  const post = postItems.find((item) => String(item.id) === key);
+
+  replyItems.set(key, [...items, reply]);
+  if (post) post.replies = String(toNumber(post.replies) + 1);
+
+  return clone(reply);
+}
+
+export async function mockLikeReply(replyId) {
+  await wait(160);
+
+  for (const items of replyItems.values()) {
+    const reply = items.find((item) => String(item.id) === String(replyId));
+    if (!reply) continue;
+
+    if (!reply.liked) {
+      reply.liked = true;
+      reply.likes = toNumber(reply.likes) + 1;
+    }
+
+    return clone({
+      liked: reply.liked,
+      likes: reply.likes,
+      changed: true,
+    });
+  }
+
+  throw new Error('Reply not found');
 }
 
 export async function mockGetRepos(params = {}) {

@@ -1,12 +1,11 @@
-import { isMockEnabled, request } from './http';
+import { request } from './http';
 import { mockSubmitGame } from './mockAdapter';
 import { normalizeGame } from './normalizers';
+import { requestWithFallback } from './runtime';
 
 const UPLOAD_TIMEOUT = Number(import.meta.env.VITE_UPLOAD_TIMEOUT || 120000);
 
 export async function uploadGame(payload) {
-  if (isMockEnabled()) return normalizeGame(await mockSubmitGame(payload));
-
   const formData = new FormData();
   Object.entries(payload || {}).forEach(([key, value]) => {
     if (Array.isArray(value)) {
@@ -16,5 +15,8 @@ export async function uploadGame(payload) {
     }
   });
 
-  return normalizeGame(await request('/api/games', { method: 'POST', body: formData, timeout: UPLOAD_TIMEOUT }));
+  return normalizeGame(await requestWithFallback(
+    () => request('/api/games', { method: 'POST', body: formData, timeout: UPLOAD_TIMEOUT }),
+    () => mockSubmitGame(payload),
+  ));
 }

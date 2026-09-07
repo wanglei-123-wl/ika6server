@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wanglei-123-wl/ika6server/backend/internal/users"
@@ -21,12 +22,26 @@ const passwordIterations = 210000
 type Service struct {
 	users       users.Repository
 	tokenSecret []byte
+	revocations TokenRevocationStore
+}
+
+type TokenRevocationStore interface {
+	RevokeTokenDigest(digest string, expiresAt time.Time) error
+	IsTokenDigestRevoked(digest string) (bool, error)
 }
 
 func NewService(store users.Repository, tokenSecret string) *Service {
+	return NewServiceWithRevocationStore(store, tokenSecret, nil)
+}
+
+func NewServiceWithRevocationStore(store users.Repository, tokenSecret string, revocations TokenRevocationStore) *Service {
+	if revocations == nil {
+		revocations = newMemoryRevocationStore()
+	}
 	return &Service{
 		users:       store,
 		tokenSecret: []byte(tokenSecret),
+		revocations: revocations,
 	}
 }
 
@@ -72,7 +87,11 @@ func (s *Service) SignTokenWithTTL(userID int64, ttl time.Duration) string {
 		ttl = 24 * time.Hour
 	}
 	exp := time.Now().UTC().Add(ttl).Unix()
-	payload := fmt.Sprintf("%d.%d", userID, exp)
+	tokenID, err := randomTokenID()
+	if err != nil {
+		tokenID = strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
+	}
+	payload := fmt.Sprintf("%d.%d.%s", userID, exp, tokenID)
 	mac := hmac.New(sha256.New, s.tokenSecret)
 	mac.Write([]byte(payload))
 	signature := hex.EncodeToString(mac.Sum(nil))
@@ -87,21 +106,24 @@ func tokenTTL(remember bool) time.Duration {
 }
 
 func (s *Service) ParseToken(token string) (int64, error) {
+	if s.IsRevoked(token) {
+		return 0, errors.New("token revoked")
+	}
 	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(token))
 	if err != nil {
 		return 0, errors.New("invalid token")
 	}
 
 	parts := strings.Split(string(raw), ".")
-	if len(parts) != 3 {
+	if len(parts) != 3 && len(parts) != 4 {
 		return 0, errors.New("invalid token")
 	}
 
-	payload := parts[0] + "." + parts[1]
+	payload := strings.Join(parts[:len(parts)-1], ".")
 	mac := hmac.New(sha256.New, s.tokenSecret)
 	mac.Write([]byte(payload))
 	expected := hex.EncodeToString(mac.Sum(nil))
-	if subtle.ConstantTimeCompare([]byte(expected), []byte(parts[2])) != 1 {
+	if subtle.ConstantTimeCompare([]byte(expected), []byte(parts[len(parts)-1])) != 1 {
 		return 0, errors.New("invalid token")
 	}
 
@@ -116,6 +138,99 @@ func (s *Service) ParseToken(token string) (int64, error) {
 	}
 
 	return userID, nil
+}
+
+func (s *Service) RevokeToken(token string) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	_, expiresAtUnix, err := s.parseTokenClaims(token)
+	if err != nil {
+		return
+	}
+	_ = s.revocations.RevokeTokenDigest(tokenDigest(token), time.Unix(expiresAtUnix, 0).UTC())
+}
+
+func (s *Service) IsRevoked(token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	revoked, err := s.revocations.IsTokenDigestRevoked(tokenDigest(token))
+	return err != nil || revoked
+}
+
+func randomTokenID() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+func tokenDigest(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Service) parseTokenClaims(token string) (int64, int64, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(token))
+	if err != nil {
+		return 0, 0, errors.New("invalid token")
+	}
+	parts := strings.Split(string(raw), ".")
+	if len(parts) != 3 && len(parts) != 4 {
+		return 0, 0, errors.New("invalid token")
+	}
+	payload := strings.Join(parts[:len(parts)-1], ".")
+	mac := hmac.New(sha256.New, s.tokenSecret)
+	mac.Write([]byte(payload))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if subtle.ConstantTimeCompare([]byte(expected), []byte(parts[len(parts)-1])) != 1 {
+		return 0, 0, errors.New("invalid token")
+	}
+	exp, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return 0, 0, errors.New("invalid token")
+	}
+	userID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, 0, errors.New("invalid token")
+	}
+	return userID, exp, nil
+}
+
+type memoryRevocationStore struct {
+	mu      sync.RWMutex
+	revoked map[string]time.Time
+}
+
+func newMemoryRevocationStore() *memoryRevocationStore {
+	return &memoryRevocationStore{revoked: make(map[string]time.Time)}
+}
+
+func (s *memoryRevocationStore) RevokeTokenDigest(digest string, expiresAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revoked[digest] = expiresAt.UTC()
+	return nil
+}
+
+func (s *memoryRevocationStore) IsTokenDigestRevoked(digest string) (bool, error) {
+	s.mu.RLock()
+	expiresAt, ok := s.revoked[digest]
+	s.mu.RUnlock()
+	if !ok {
+		return false, nil
+	}
+	if time.Now().UTC().After(expiresAt) {
+		s.mu.Lock()
+		delete(s.revoked, digest)
+		s.mu.Unlock()
+		return false, nil
+	}
+	return true, nil
 }
 
 func HashPassword(password string) (string, error) {

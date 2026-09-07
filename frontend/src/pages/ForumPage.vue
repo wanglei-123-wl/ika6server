@@ -23,6 +23,10 @@ defineProps({
     type: Array,
     required: true,
   },
+  currentUser: {
+    type: Object,
+    default: null,
+  },
 });
 
 const pinnedPost = {
@@ -38,7 +42,7 @@ const pinnedPost = {
   liked: true,
 };
 
-const emit = defineEmits(['update:activeForumCat', 'update:activeBar', 'notice', 'create-post', 'like-post']);
+const emit = defineEmits(['update:activeForumCat', 'update:activeBar', 'notice', 'create-post', 'like-post', 'request-auth', 'reply-created']);
 
 function selectBar(bar) {
   emit('update:activeBar', bar);
@@ -66,9 +70,18 @@ function selectBar(bar) {
         <div class="forum-cats">
           <button v-for="cat in forumCats" :key="cat" class="cat-btn" :class="{ active: activeForumCat === cat }" @click="emit('update:activeForumCat', cat)">{{ cat }}</button>
         </div>
-        <PostItem :post="pinnedPost" pinned />
+        <PostItem :post="pinnedPost" :current-user="currentUser" pinned />
         <div v-if="forumPosts.length" class="post-list">
-          <PostItem v-for="post in forumPosts" :key="post.title" :post="post" @like="emit('like-post', $event)" />
+          <PostItem
+            v-for="post in forumPosts"
+            :key="post.id || post.title"
+            :post="post"
+            :current-user="currentUser"
+            @like="emit('like-post', $event)"
+            @notice="emit('notice', $event)"
+            @request-auth="emit('request-auth')"
+            @reply-created="emit('reply-created', $event)"
+          />
         </div>
         <StateBlock v-else icon="帖" title="这个分类暂无帖子" text="换个分类看看，或者等后端返回新的社区内容。" />
       </div>

@@ -102,6 +102,7 @@ type Store struct {
 	replies     map[int64][]Reply
 	gameLikes   map[int64]map[int64]bool
 	postLikes   map[int64]map[int64]bool
+	replyLikes  map[int64]map[int64]bool
 }
 
 func NewStore() *Store {
@@ -116,10 +117,11 @@ func NewStore() *Store {
 		posts: []ForumPost{
 			{ID: 1, Ava: "Q", BG: "linear-gradient(135deg,#06B6D4,#3B82F6)", Name: "quietforge", Level: "lv7", Time: "刚刚", Cat: "作品发布", Tags: []string{"开发日志"}, Title: "【开发日志 #14】虚空回廊终于做完 BOSS 战", Excerpt: "肝了整整 18 天，终于把核心战斗循环打磨完成。", Replies: "142", Views: "3.2k", Likes: 328, BarID: 1, Status: "published"},
 		},
-		repos:     []Repo{{ID: 1, Icon: "◆", Name: "void-corridor", Desc: "Roguelike 动作 RPG 完整源码", Lang: "GDScript", Dots: "#478CBF", License: "MIT", Stars: "8.2k", Forks: "1.1k", Downloads: "24.3k", Size: "24 MB", Badge: "完整模板"}},
-		replies:   make(map[int64][]Reply),
-		gameLikes: make(map[int64]map[int64]bool),
-		postLikes: make(map[int64]map[int64]bool),
+		repos:      []Repo{{ID: 1, Icon: "◆", Name: "void-corridor", Desc: "Roguelike 动作 RPG 完整源码", Lang: "GDScript", Dots: "#478CBF", License: "MIT", Stars: "8.2k", Forks: "1.1k", Downloads: "24.3k", Size: "24 MB", Badge: "完整模板"}},
+		replies:    make(map[int64][]Reply),
+		gameLikes:  make(map[int64]map[int64]bool),
+		postLikes:  make(map[int64]map[int64]bool),
+		replyLikes: make(map[int64]map[int64]bool),
 	}
 }
 
@@ -138,6 +140,38 @@ func (s *Store) Posts() []ForumPost {
 	defer s.mu.RUnlock()
 	return append([]ForumPost(nil), s.posts...)
 }
+
+func (s *Store) HotPosts() []ForumPost {
+	items := s.Posts()
+	result := make([]ForumPost, 0, len(items))
+	for _, item := range items {
+		if item.Status == "published" {
+			result = append(result, item)
+		}
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		return postHeat(result[i]) > postHeat(result[j])
+	})
+	return result
+}
+
+func (s *Store) HomeStats() map[string]any {
+	games := s.Games()
+	projects, plays := 0, int64(0)
+	contributors := make(map[string]struct{})
+	for _, item := range games {
+		if item.Status != "published" {
+			continue
+		}
+		projects++
+		plays += parseCount(item.Plays)
+		if item.Author != "" {
+			contributors[item.Author] = struct{}{}
+		}
+	}
+	return map[string]any{"projects": projects, "plays": plays, "contributors": len(contributors), "price": 0}
+}
+
 func (s *Store) Repos() []Repo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -167,6 +201,18 @@ func (s *Store) RemoveGame(id int64) {
 	}
 }
 
+func (s *Store) DownloadRepo(id int64) (Repo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.repos {
+		if s.repos[index].ID == id {
+			s.repos[index].Downloads = incrementCount(s.repos[index].Downloads)
+			return s.repos[index], nil
+		}
+	}
+	return Repo{}, errors.New("repository not found")
+}
+
 func (s *Store) Repo(id int64) (Repo, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -184,6 +230,18 @@ func (s *Store) Post(id int64) (ForumPost, bool) {
 	for _, item := range s.posts {
 		if item.ID == id {
 			return item, true
+		}
+	}
+	return ForumPost{}, false
+}
+
+func (s *Store) ViewPost(id int64) (ForumPost, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.posts {
+		if s.posts[index].ID == id {
+			s.posts[index].Views = incrementCount(s.posts[index].Views)
+			return s.posts[index], true
 		}
 	}
 	return ForumPost{}, false
@@ -242,7 +300,7 @@ func (s *Store) AddPost(author, title, cat, content string, tags []string, barID
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	item := ForumPost{ID: s.nextPostID, Ava: strings.ToUpper(string([]rune(author)[0])), BG: "linear-gradient(135deg,#06B6D4,#3B82F6)", Name: author, Level: "lv1", Time: "刚刚", Cat: strings.TrimSpace(cat), Tags: append([]string(nil), tags...), Title: title, Excerpt: content, Replies: "0", Views: "0", BarID: barID}
+	item := ForumPost{ID: s.nextPostID, Ava: strings.ToUpper(string([]rune(author)[0])), BG: "linear-gradient(135deg,#06B6D4,#3B82F6)", Name: author, Level: "lv1", Time: "刚刚", Cat: strings.TrimSpace(cat), Tags: append([]string(nil), tags...), Title: title, Excerpt: content, Replies: "0", Views: "0", BarID: barID, Status: "pending"}
 	s.nextPostID++
 	s.posts = append(s.posts, item)
 	return item, nil
@@ -269,8 +327,11 @@ func (s *Store) ReviewGame(id int64, status string) (Game, error) {
 
 func (s *Store) ReviewPost(id int64, status string) (ForumPost, error) {
 	status = strings.ToLower(strings.TrimSpace(status))
-	if status != "approved" && status != "hidden" && status != "rejected" {
-		return ForumPost{}, errors.New("status must be approved, hidden or rejected")
+	if status == "approved" {
+		status = "published"
+	}
+	if status != "published" && status != "hidden" && status != "rejected" {
+		return ForumPost{}, errors.New("status must be approved, published, hidden or rejected")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -314,6 +375,29 @@ func (s *Store) LikePost(id, userID int64) (ForumPost, bool, error) {
 	return ForumPost{}, false, errors.New("post not found")
 }
 
+func (s *Store) LikeReply(replyID, userID int64) (Reply, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for postID, replies := range s.replies {
+		for index := range replies {
+			if replies[index].ID != replyID {
+				continue
+			}
+			if s.replyLikes[replyID] == nil {
+				s.replyLikes[replyID] = make(map[int64]bool)
+			}
+			if s.replyLikes[replyID][userID] {
+				return replies[index], false, nil
+			}
+			s.replyLikes[replyID][userID] = true
+			s.replies[postID][index].Likes++
+			s.replies[postID][index].Liked = true
+			return s.replies[postID][index], true, nil
+		}
+	}
+	return Reply{}, false, errors.New("reply not found")
+}
+
 func (s *Store) AddReply(author, content string, postID int64) (Reply, error) {
 	content = strings.TrimSpace(content)
 	if author == "" || content == "" || postID <= 0 {
@@ -350,6 +434,19 @@ func (s *Store) Replies(postID int64) ([]Reply, bool) {
 	return append([]Reply(nil), s.replies[postID]...), true
 }
 
+func (s *Store) RepliesForUser(postID, userID int64) ([]Reply, bool) {
+	items, ok := s.Replies(postID)
+	if !ok || userID <= 0 {
+		return items, ok
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for index := range items {
+		items[index].Liked = s.replyLikes[items[index].ID][userID]
+	}
+	return items, true
+}
+
 func incrementCount(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -367,6 +464,27 @@ func incrementCount(value string) string {
 		return value
 	}
 	return strconv.FormatInt(n+1, 10)
+}
+
+func postHeat(item ForumPost) int64 {
+	return item.Likes*5 + parseCount(item.Views) + parseCount(item.Replies)*3
+}
+
+func parseCount(value string) int64 {
+	value = strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, ",", "")))
+	if value == "" {
+		return 0
+	}
+	multiplier := float64(1)
+	if strings.HasSuffix(value, "k") {
+		multiplier = 1000
+		value = strings.TrimSpace(strings.TrimSuffix(value, "k"))
+	}
+	number, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0
+	}
+	return int64(number * multiplier)
 }
 
 func FilterGames(items []Game, query map[string]string) []Game {

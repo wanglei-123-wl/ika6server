@@ -7,5 +7,6 @@ export * from './home';
 export * from './http';
 export * from './normalizers';
 export * from './repos';
+export * from './runtime';
 export * from './search';
 export * from './upload';

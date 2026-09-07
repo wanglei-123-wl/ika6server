@@ -1,5 +1,5 @@
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
-const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false';
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true';
 const REQUEST_TIMEOUT = Number(import.meta.env.VITE_API_TIMEOUT || 15000);
 const TOKEN_KEY = 'ika6_auth_token';
 export const AUTH_EXPIRED_EVENT = 'ika6:auth-expired';

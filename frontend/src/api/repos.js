@@ -1,16 +1,26 @@
-import { isMockEnabled, request } from './http';
+import { request } from './http';
 import { mockDownloadRepo, mockGetRepoDetail, mockGetRepos } from './mockAdapter';
 import { normalizeDownload, normalizePage, normalizeRepo } from './normalizers';
+import { requestWithFallback } from './runtime';
 
 export async function getRepoList(params) {
-  const result = isMockEnabled() ? await mockGetRepos(params) : await request('/api/repos', { params });
+  const result = await requestWithFallback(
+    () => request('/api/repos', { params }),
+    () => mockGetRepos(params),
+  );
   return normalizePage(result, normalizeRepo);
 }
 
 export async function getRepoDetail(id) {
-  return normalizeRepo(isMockEnabled() ? await mockGetRepoDetail(id) : await request(`/api/repos/${id}`));
+  return normalizeRepo(await requestWithFallback(
+    () => request(`/api/repos/${id}`),
+    () => mockGetRepoDetail(id),
+  ));
 }
 
 export async function downloadRepo(id) {
-  return normalizeDownload(isMockEnabled() ? await mockDownloadRepo(id) : await request(`/api/repos/${id}/download`));
+  return normalizeDownload(await requestWithFallback(
+    () => request(`/api/repos/${id}/download`),
+    () => mockDownloadRepo(id),
+  ));
 }
