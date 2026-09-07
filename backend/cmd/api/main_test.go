@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanglei-123-wl/ika6server/backend/internal/audit"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/auth"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/catalog"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/config"
@@ -27,6 +28,7 @@ func testApp() *app {
 		users:      userStore,
 		auth:       auth.NewService(userStore, "test-secret"),
 		posts:      posts.NewStore(),
+		auditLog:   audit.NewMemoryLogger(),
 		catalog:    catalog.NewStore(),
 		reputation: reputation.NewStore(),
 	}
@@ -120,6 +122,125 @@ func TestAuthMeRequiresBearerToken(t *testing.T) {
 	}
 }
 
+func TestLoginRejectsWrongPassword(t *testing.T) {
+	a := testApp()
+	handler := testHandler(a)
+	_ = registerTestUserWithCredentials(t, handler, "builder", "builder@test.com")
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"account":"builder@test.com","password":"wrong-password"}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong password login status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestLoginRejectsWrongAccountWithKnownPassword(t *testing.T) {
+	a := testApp()
+	handler := testHandler(a)
+	_ = registerTestUserWithCredentials(t, handler, "builder", "builder@test.com")
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"account":"unknown@test.com","password":"12345678"}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong account login status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestLogoutRevokesCurrentToken(t *testing.T) {
+	a := testApp()
+	handler := testHandler(a)
+	token := registerTestUserWithCredentials(t, handler, "builder", "builder@test.com")
+
+	logout := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(logout, request)
+	if logout.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, body = %s", logout.Code, logout.Body.String())
+	}
+
+	me := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(me, request)
+	if me.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked token status = %d, body = %s", me.Code, me.Body.String())
+	}
+
+	login := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"account":"builder@test.com","password":"12345678"}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(login, request)
+	if login.Code != http.StatusOK {
+		t.Fatalf("fresh login status = %d, body = %s", login.Code, login.Body.String())
+	}
+	var envelope struct {
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(login.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.Token == "" || envelope.Data.Token == token {
+		t.Fatalf("expected fresh non-empty token, got %q", envelope.Data.Token)
+	}
+}
+
+func TestSocialLoginCreatesAndReusesLocalAccount(t *testing.T) {
+	a := testApp()
+	handler := testHandler(a)
+
+	first := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/social-login", strings.NewReader(`{"provider":"GitHub","account":"octo@test.com","name":"octo"}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(first, request)
+	if first.Code != http.StatusOK {
+		t.Fatalf("social login status = %d, body = %s", first.Code, first.Body.String())
+	}
+	var firstEnvelope struct {
+		Data struct {
+			Token string `json:"token"`
+			User  struct {
+				ID     int64  `json:"id"`
+				Method string `json:"method"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &firstEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if firstEnvelope.Data.Token == "" || firstEnvelope.Data.User.Method != "GitHub" {
+		t.Fatalf("unexpected social login response: %s", first.Body.String())
+	}
+
+	second := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/auth/social-login", strings.NewReader(`{"method":"GitHub","email":"octo@test.com","username":"ignored"}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(second, request)
+	if second.Code != http.StatusOK {
+		t.Fatalf("repeat social login status = %d, body = %s", second.Code, second.Body.String())
+	}
+	var secondEnvelope struct {
+		Data struct {
+			Token string `json:"token"`
+			User  struct {
+				ID int64 `json:"id"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if secondEnvelope.Data.Token == "" || secondEnvelope.Data.User.ID != firstEnvelope.Data.User.ID {
+		t.Fatalf("expected social login to reuse user, first=%s second=%s", first.Body.String(), second.Body.String())
+	}
+}
+
 func registerTestUser(t *testing.T, handler http.Handler) string {
 	t.Helper()
 	recorder := httptest.NewRecorder()
@@ -196,6 +317,28 @@ func TestPhaseTwoInteractions(t *testing.T) {
 	handler.ServeHTTP(reply, request)
 	if reply.Code != http.StatusCreated || !strings.Contains(reply.Body.String(), `"postId":2`) {
 		t.Fatalf("reply failed: %d %s", reply.Code, reply.Body.String())
+	}
+
+	replyLike := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/forum/replies/1/like", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(replyLike, request)
+	if replyLike.Code != http.StatusOK || !strings.Contains(replyLike.Body.String(), `"likes":1`) || !strings.Contains(replyLike.Body.String(), `"changed":true`) {
+		t.Fatalf("reply like failed: %d %s", replyLike.Code, replyLike.Body.String())
+	}
+
+	duplicateReplyLike := httptest.NewRecorder()
+	handler.ServeHTTP(duplicateReplyLike, request)
+	if duplicateReplyLike.Code != http.StatusOK || !strings.Contains(duplicateReplyLike.Body.String(), `"likes":1`) || !strings.Contains(duplicateReplyLike.Body.String(), `"changed":false`) {
+		t.Fatalf("duplicate reply like was not idempotent: %d %s", duplicateReplyLike.Code, duplicateReplyLike.Body.String())
+	}
+
+	replyList := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/forum/posts/2/replies?page=1&pageSize=20", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(replyList, request)
+	if replyList.Code != http.StatusOK || !strings.Contains(replyList.Body.String(), `"liked":true`) {
+		t.Fatalf("reply list did not include current user like state: %d %s", replyList.Code, replyList.Body.String())
 	}
 
 	game := httptest.NewRecorder()
@@ -278,6 +421,14 @@ func TestPhaseThreeAdminControls(t *testing.T) {
 	handler.ServeHTTP(bannedWrite, request)
 	if bannedWrite.Code != http.StatusForbidden {
 		t.Fatalf("banned write status = %d, body = %s", bannedWrite.Code, bannedWrite.Body.String())
+	}
+
+	auditLogs := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/admin/audit-logs", nil)
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	handler.ServeHTTP(auditLogs, request)
+	if auditLogs.Code != http.StatusOK || !strings.Contains(auditLogs.Body.String(), `"audit_logs"`) && !strings.Contains(auditLogs.Body.String(), `"review_game"`) {
+		t.Fatalf("audit logs failed: %d %s", auditLogs.Code, auditLogs.Body.String())
 	}
 }
 

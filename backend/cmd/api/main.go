@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log"
@@ -39,8 +41,9 @@ type app struct {
 	posts      *posts.Store
 	files      *files.Store
 	audit      *audit.Service
-	blocklist  *blocklist.Store
-	reputation *reputation.Store
+	auditLog   audit.Logger
+	blocklist  blocklist.Repository
+	reputation reputation.Repository
 	catalog    *catalog.Store
 	sqlCatalog *catalog.SQLRepository
 	httpServer *http.Server
@@ -58,6 +61,10 @@ func main() {
 	userStore := users.NewStoreWithAdmin(cfg.BootstrapAdminAccount)
 	var userRepository users.Repository = userStore
 	var sqlCatalog *catalog.SQLRepository
+	var tokenRevocations auth.TokenRevocationStore
+	var blocklistRepository blocklist.Repository
+	var reputationRepository reputation.Repository
+	var auditLogger audit.Logger
 	if cfg.DatabaseURL != "" {
 		pingContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := db.Ping(pingContext)
@@ -80,16 +87,41 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		tokenRevocations, err = auth.NewSQLRevocationStore(db.SQL())
+		if err != nil {
+			log.Fatal(err)
+		}
+		blocklistRepository, err = blocklist.NewSQLRepository(db.SQL())
+		if err != nil {
+			log.Fatal(err)
+		}
+		reputationRepository, err = reputation.NewSQLRepository(db.SQL())
+		if err != nil {
+			log.Fatal(err)
+		}
+		auditLogger, err = audit.NewSQLLogger(db.SQL())
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 	postStore := posts.NewStore()
 	catalogStore := catalog.NewStore()
 	blocklistStore := blocklist.NewStore()
 	reputationStore := reputation.NewStore()
+	if blocklistRepository == nil {
+		blocklistRepository = blocklistStore
+	}
+	if reputationRepository == nil {
+		reputationRepository = reputationStore
+	}
+	if auditLogger == nil {
+		auditLogger = audit.NewMemoryLogger()
+	}
 	application := &app{
 		config:   cfg,
 		database: db,
 		users:    userRepository,
-		auth:     auth.NewService(userRepository, cfg.TokenSecret),
+		auth:     auth.NewServiceWithRevocationStore(userRepository, cfg.TokenSecret, tokenRevocations),
 		posts:    postStore,
 		files: files.NewStore(cfg.UploadDir, cfg.TempDir, scanner.New(scanner.Config{
 			ClamScanBin: cfg.ClamScanBin,
@@ -97,10 +129,11 @@ func main() {
 			SevenZipBin: cfg.SevenZipBin,
 			YaraBin:     cfg.YaraBin,
 			YaraRules:   cfg.YaraRules,
-		}), sandbox.NewAnalyzer(), blocklistStore),
+		}), sandbox.NewAnalyzer(), blocklistRepository),
 		audit:      audit.NewService(postStore),
-		blocklist:  blocklistStore,
-		reputation: reputationStore,
+		auditLog:   auditLogger,
+		blocklist:  blocklistRepository,
+		reputation: reputationRepository,
 		catalog:    catalogStore,
 		sqlCatalog: sqlCatalog,
 	}
@@ -142,6 +175,8 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/forum/posts/{id}/like", a.handleLikeForumPost)
 	mux.HandleFunc("GET /api/forum/posts/{id}/replies", a.handleReplies)
 	mux.HandleFunc("POST /api/forum/posts/{id}/replies", a.handleCreateReply)
+	mux.HandleFunc("POST /api/forum/replies/{id}/like", a.handleLikeReply)
+	mux.HandleFunc("POST /api/forum/posts/{postID}/replies/{id}/like", a.handleLikeReply)
 	mux.HandleFunc("GET /api/repos", a.handleRepos)
 	mux.HandleFunc("GET /api/repos/{id}", a.handleRepo)
 	mux.HandleFunc("GET /api/repos/{id}/download", a.handleRepoDownload)
@@ -159,6 +194,7 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/blocklist", a.handleListBlocklist)
 	mux.HandleFunc("POST /api/admin/blocklist", a.handleAddBlocklist)
 	mux.HandleFunc("GET /api/admin/reputation", a.handleListReputation)
+	mux.HandleFunc("GET /api/admin/audit-logs", a.handleListAuditLogs)
 	mux.HandleFunc("GET /api/admin/dashboard", a.handleAdminDashboard)
 	mux.HandleFunc("POST /api/admin/games/{id}/review", a.handleReviewGame)
 	mux.HandleFunc("POST /api/admin/posts/{id}/review", a.handleReviewForumPost)
@@ -255,14 +291,74 @@ func (a *app) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
+	token, ok := bearerToken(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "bearer token required")
+		return
+	}
 	if _, ok := a.currentUser(w, r); !ok {
 		return
 	}
+	a.auth.RevokeToken(token)
 	writeAPI(w, http.StatusOK, map[string]any{"loggedOut": true})
 }
 
 func (a *app) handleSocialLogin(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "social login is not implemented in phase 1")
+	var input struct {
+		Provider string `json:"provider"`
+		Method   string `json:"method"`
+		Account  string `json:"account"`
+		Email    string `json:"email"`
+		Name     string `json:"name"`
+		Username string `json:"username"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	provider := strings.TrimSpace(input.Provider)
+	if provider == "" {
+		provider = strings.TrimSpace(input.Method)
+	}
+	email := strings.ToLower(strings.TrimSpace(input.Email))
+	if email == "" {
+		email = strings.ToLower(strings.TrimSpace(input.Account))
+	}
+	username := strings.TrimSpace(input.Username)
+	if username == "" {
+		username = strings.TrimSpace(input.Name)
+	}
+	if provider == "" || email == "" {
+		writeError(w, http.StatusBadRequest, "provider and account are required")
+		return
+	}
+	if username == "" {
+		username = strings.TrimSpace(strings.Split(email, "@")[0])
+	}
+	if username == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	user, ok := a.users.FindByEmail(email)
+	if !ok {
+		hash, err := auth.HashPassword(randomLocalPassword())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create social account")
+			return
+		}
+		user, err = a.users.Create(username, email, hash)
+		if err != nil {
+			var exists bool
+			user, exists = a.users.FindByEmail(email)
+			if !exists {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+	}
+
+	token := a.auth.SignToken(user.ID)
+	writeAPI(w, http.StatusOK, map[string]any{"user": publicUser(user, provider), "token": token})
 }
 
 func (a *app) handleHome(w http.ResponseWriter, r *http.Request) {
@@ -277,18 +373,23 @@ func (a *app) handleHome(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to load latest games")
 			return
 		}
-		posts, err := a.sqlCatalog.ForumPosts(r.Context())
+		hotPosts, err := a.sqlCatalog.HotPosts(r.Context())
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load home posts")
+			writeError(w, http.StatusInternalServerError, "failed to load hot posts")
 			return
 		}
-		writeAPI(w, http.StatusOK, map[string]any{"stats": stats, "latestGames": games, "hotPosts": posts, "feedPosts": posts})
+		feedPosts, err := a.sqlCatalog.ForumPosts(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load feed posts")
+			return
+		}
+		writeAPI(w, http.StatusOK, map[string]any{"stats": stats, "latestGames": games, "hotPosts": hotPosts, "feedPosts": feedPosts})
 		return
 	}
 	writeAPI(w, http.StatusOK, map[string]any{
-		"stats":       map[string]any{"projects": len(a.catalog.Games()), "plays": 0, "contributors": 0, "price": 0},
+		"stats":       a.catalog.HomeStats(),
 		"latestGames": catalog.FilterGames(a.catalog.Games(), nil),
-		"hotPosts":    publishedPosts(a.catalog.Posts()),
+		"hotPosts":    a.catalog.HotPosts(),
 		"feedPosts":   publishedPosts(a.catalog.Posts()),
 	})
 }
@@ -318,7 +419,8 @@ func (a *app) handleDevDocs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleUpdateDevDocs(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.currentAdmin(w, r); !ok {
+	user, ok := a.currentAdmin(w, r)
+	if !ok {
 		return
 	}
 	if a.sqlCatalog == nil {
@@ -333,6 +435,7 @@ func (a *app) handleUpdateDevDocs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	a.logAdminAction(user.ID, "update_dev_docs", "developer_docs", 1, docs)
 	writeAPI(w, http.StatusOK, map[string]any{"updated": true, "quickstart": docs})
 }
 
@@ -544,6 +647,12 @@ func (a *app) handleGameFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "download blocked: "+entry.Reason)
 		return
 	}
+	if a.sqlCatalog != nil {
+		if err := a.sqlCatalog.IncrementGameFileDownloads(r.Context(), id, kind); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "failed to record file download")
+			return
+		}
+	}
 	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeHeader(file.OriginalName)+`"`)
 	http.ServeFile(w, r, path)
 }
@@ -624,7 +733,7 @@ func (a *app) handleForumPost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, exists := a.catalog.Post(id)
+	item, exists := a.catalog.ViewPost(id)
 	if a.sqlCatalog != nil {
 		item, err := a.sqlCatalog.ForumPost(r.Context(), id)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -670,7 +779,7 @@ func (a *app) handleCreateForumPost(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, createErr.Error())
 			return
 		}
-		item, err = a.sqlCatalog.ForumPost(r.Context(), id)
+		item, err = a.sqlCatalog.ForumPostByID(r.Context(), id)
 	} else {
 		item, err = a.catalog.AddPost(user.Username, input.Title, input.Cat, input.Content, input.Tags, input.BarID)
 	}
@@ -694,7 +803,7 @@ func (a *app) handleLikeForumPost(w http.ResponseWriter, r *http.Request) {
 	if a.sqlCatalog != nil {
 		changed, err = a.sqlCatalog.LikeForumPost(r.Context(), id, user.ID)
 		if err == nil {
-			item, err = a.sqlCatalog.ForumPost(r.Context(), id)
+			item, err = a.sqlCatalog.ForumPostByID(r.Context(), id)
 		}
 	}
 	if err != nil {
@@ -704,14 +813,59 @@ func (a *app) handleLikeForumPost(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, http.StatusOK, map[string]any{"liked": item.Liked, "likes": item.Likes, "changed": changed})
 }
 
+func (a *app) handleLikeReply(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	id, ok := routeID(w, r, "replies")
+	if !ok {
+		return
+	}
+	var (
+		reply   catalog.Reply
+		changed bool
+		err     error
+	)
+	if a.sqlCatalog != nil {
+		reply, changed, err = a.sqlCatalog.LikeReply(r.Context(), id, user.ID)
+	} else {
+		reply, changed, err = a.catalog.LikeReply(id, user.ID)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "reply not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeAPI(w, http.StatusOK, map[string]any{"liked": true, "likes": reply.Likes, "changed": changed})
+}
+
 func (a *app) handleReplies(w http.ResponseWriter, r *http.Request) {
 	id, ok := routeID(w, r, "posts")
 	if !ok {
 		return
 	}
+	user, authenticated, ok := a.optionalCurrentUser(w, r)
+	if !ok {
+		return
+	}
 	items, exists := a.catalog.Replies(id)
+	if authenticated {
+		items, exists = a.catalog.RepliesForUser(id, user.ID)
+	}
 	if a.sqlCatalog != nil {
-		sqlItems, err := a.sqlCatalog.Replies(r.Context(), id)
+		var (
+			sqlItems []catalog.Reply
+			err      error
+		)
+		if authenticated {
+			sqlItems, err = a.sqlCatalog.RepliesForUser(r.Context(), id, user.ID)
+		} else {
+			sqlItems, err = a.sqlCatalog.Replies(r.Context(), id)
+		}
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "post not found")
 			return
@@ -824,8 +978,8 @@ func (a *app) handleRepoDownload(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusOK, map[string]any{"downloadUrl": item.DownloadURL, "size": item.Size})
 		return
 	}
-	item, exists := a.catalog.Repo(id)
-	if !exists {
+	item, err := a.catalog.DownloadRepo(id)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "repository not found")
 		return
 	}
@@ -1015,8 +1169,10 @@ func (a *app) auditPost(w http.ResponseWriter, r *http.Request, approved bool) {
 	})
 	if approved {
 		a.reputation.Add(post.AuthorID, reputation.EventPostApproved, 20, "post approved")
+		a.logAdminAction(user.ID, "approve_legacy_post", "post", postID, map[string]any{"approved": true})
 	} else {
 		a.reputation.Add(post.AuthorID, reputation.EventPostRejected, -30, "post rejected")
+		a.logAdminAction(user.ID, "reject_legacy_post", "post", postID, map[string]any{"approved": false})
 	}
 }
 
@@ -1055,6 +1211,7 @@ func (a *app) handleAddBlocklist(w http.ResponseWriter, r *http.Request) {
 		"ok":    true,
 		"entry": entry,
 	})
+	a.logAdminAction(user.ID, "add_blocklist", "download_blocklist", 0, entry)
 }
 
 func (a *app) handleListReputation(w http.ResponseWriter, r *http.Request) {
@@ -1066,6 +1223,17 @@ func (a *app) handleListReputation(w http.ResponseWriter, r *http.Request) {
 		"ok":    true,
 		"items": a.reputation.List(),
 	})
+}
+
+func (a *app) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.currentAdmin(w, r); !ok {
+		return
+	}
+	items := []audit.Entry{}
+	if a.auditLog != nil {
+		items = a.auditLog.List()
+	}
+	writeAPI(w, http.StatusOK, paginate(items, r))
 }
 
 func (a *app) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
@@ -1105,7 +1273,8 @@ func (a *app) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleReviewGame(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.currentAdmin(w, r); !ok {
+	user, ok := a.currentAdmin(w, r)
+	if !ok {
 		return
 	}
 	id, ok := routeID(w, r, "games")
@@ -1133,11 +1302,13 @@ func (a *app) handleReviewGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	a.logAdminAction(user.ID, "review_game", "game", id, map[string]any{"status": input.Status, "reason": input.Reason})
 	writeAPI(w, http.StatusOK, map[string]any{"item": item, "reason": input.Reason})
 }
 
 func (a *app) handleReviewForumPost(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.currentAdmin(w, r); !ok {
+	user, ok := a.currentAdmin(w, r)
+	if !ok {
 		return
 	}
 	id, ok := routeID(w, r, "posts")
@@ -1156,7 +1327,7 @@ func (a *app) handleReviewForumPost(w http.ResponseWriter, r *http.Request) {
 	if a.sqlCatalog != nil {
 		err = a.sqlCatalog.ReviewForumPost(r.Context(), id, input.Status)
 		if err == nil {
-			item, err = a.sqlCatalog.ForumPost(r.Context(), id)
+			item, err = a.sqlCatalog.ForumPostByID(r.Context(), id)
 		}
 	} else {
 		item, err = a.catalog.ReviewPost(id, input.Status)
@@ -1165,11 +1336,13 @@ func (a *app) handleReviewForumPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	a.logAdminAction(user.ID, "review_forum_post", "forum_post", id, map[string]any{"status": input.Status, "reason": input.Reason})
 	writeAPI(w, http.StatusOK, map[string]any{"item": item, "reason": input.Reason})
 }
 
 func (a *app) handleBanUser(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.currentAdmin(w, r); !ok {
+	adminUser, ok := a.currentAdmin(w, r)
+	if !ok {
 		return
 	}
 	id, ok := routeID(w, r, "users")
@@ -1192,13 +1365,13 @@ func (a *app) handleBanUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	a.logAdminAction(adminUser.ID, "ban_user", "user", id, map[string]any{"reason": input.Reason, "until": input.Until.UTC()})
 	writeAPI(w, http.StatusOK, map[string]any{"user": publicUser(user, "password"), "reason": input.Reason, "until": input.Until.UTC()})
 }
 
 func (a *app) currentUser(w http.ResponseWriter, r *http.Request) (users.User, bool) {
-	authHeader := r.Header.Get("Authorization")
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-	if token == authHeader {
+	token, ok := bearerToken(r)
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "bearer token required")
 		return users.User{}, false
 	}
@@ -1220,6 +1393,41 @@ func (a *app) currentUser(w http.ResponseWriter, r *http.Request) (users.User, b
 	}
 
 	return user, true
+}
+
+func (a *app) optionalCurrentUser(w http.ResponseWriter, r *http.Request) (users.User, bool, bool) {
+	token, ok := bearerToken(r)
+	if !ok {
+		return users.User{}, false, true
+	}
+	userID, err := a.auth.ParseToken(token)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return users.User{}, false, false
+	}
+	user, ok := a.users.FindByID(userID)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "user not found")
+		return users.User{}, false, false
+	}
+	if a.users.IsBanned(user, time.Now().UTC()) {
+		writeError(w, http.StatusForbidden, "user is banned: "+user.BanReason)
+		return users.User{}, false, false
+	}
+	return user, true, true
+}
+
+func (a *app) logAdminAction(actorID int64, action, target string, targetID int64, details any) {
+	if a.auditLog == nil {
+		return
+	}
+	a.auditLog.Log(actorID, action, target, targetID, details)
+}
+
+func bearerToken(r *http.Request) (string, bool) {
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	return token, token != "" && token != authHeader
 }
 
 func (a *app) currentAdmin(w http.ResponseWriter, r *http.Request) (users.User, bool) {
@@ -1335,6 +1543,14 @@ func postIDFromPath(w http.ResponseWriter, r *http.Request) (int64, bool) {
 
 func sanitizeHeader(value string) string {
 	return strings.NewReplacer("\r", "", "\n", "", `"`, "").Replace(value)
+}
+
+func randomLocalPassword() string {
+	value := make([]byte, 32)
+	if _, err := rand.Read(value); err != nil {
+		return strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
+	}
+	return base64.RawURLEncoding.EncodeToString(value)
 }
 
 func withCORS(next http.Handler) http.Handler {

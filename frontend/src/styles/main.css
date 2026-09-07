@@ -1240,6 +1240,12 @@ button {
   font-weight: 900;
 }
 
+.r-ava {
+  flex: 0 0 auto;
+  background: var(--gradient-2);
+  color: white;
+}
+
 .thread-head,
 .r-head {
   display: flex;
@@ -1315,11 +1321,12 @@ button {
 
 .reply-list {
   display: grid;
-  gap: 10px;
+  gap: 12px;
   margin-top: 14px;
   padding: 12px;
+  border: 1px solid var(--border);
   border-radius: 12px;
-  background: rgba(7, 6, 13, 0.42);
+  background: color-mix(in srgb, var(--surface-2) 78%, transparent);
 }
 
 .reply-item {
@@ -1327,14 +1334,105 @@ button {
   gap: 10px;
 }
 
+.reply-items {
+  display: grid;
+  gap: 12px;
+}
+
+.reply-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.reply-empty {
+  display: grid;
+  gap: 4px;
+  color: var(--text);
+}
+
+.reply-empty span {
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.reply-compose {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.reply-compose textarea {
+  width: 100%;
+  min-height: 72px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-1);
+  color: var(--text);
+  resize: vertical;
+  outline: none;
+}
+
+.reply-compose textarea:focus {
+  border-color: var(--accent);
+}
+
+.reply-compose textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.reply-compose-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
 .r-text {
   color: var(--text-2);
   font-size: 13px;
 }
 
+.reply-like-btn {
+  margin-top: 6px;
+  padding: 0;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.reply-like-btn:hover:not(:disabled) {
+  color: var(--pink);
+}
+
+.reply-like-btn.liked {
+  color: var(--pink);
+}
+
+.reply-like-btn:disabled {
+  cursor: default;
+}
+
 .more-floors {
   color: var(--accent);
   font-size: 12px;
+}
+
+.mini-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
 }
 
 .tieba-row {
@@ -1903,9 +2001,16 @@ button {
 }
 
 .btn:disabled,
-.icon-btn:disabled {
+.icon-btn:disabled,
+.game-act-btn:disabled {
   cursor: not-allowed;
   opacity: 0.58;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .admin-page {

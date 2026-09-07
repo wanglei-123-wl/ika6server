@@ -1,5 +1,6 @@
 <script setup>
 import { ref } from 'vue';
+import ReplyPanel from './ReplyPanel.vue';
 
 const props = defineProps({
   post: {
@@ -10,14 +11,26 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  currentUser: {
+    type: Object,
+    default: null,
+  },
 });
 
-const emit = defineEmits(['like']);
+const emit = defineEmits(['like', 'notice', 'request-auth', 'reply-created']);
 const expanded = ref(false);
+
+function canExpandReplies() {
+  return !props.pinned && Boolean(props.post?.id);
+}
+
+function toggleReplies() {
+  if (canExpandReplies()) expanded.value = !expanded.value;
+}
 </script>
 
 <template>
-  <article :class="pinned ? 'pin-thread' : 'post-item'" @click="expanded = !expanded">
+  <article :class="pinned ? 'pin-thread' : 'post-item'" @click="toggleReplies">
     <div class="thread-avatar" :style="{ background: post.bg }">{{ post.ava }}</div>
     <div class="post-body">
       <div class="thread-head">
@@ -41,22 +54,16 @@ const expanded = ref(false);
         <button class="like-btn" :class="{ liked: post.liked }" @click.stop="emit('like', post)">
           ♥ {{ post.likes }}
         </button>
-        <span class="post-jump">{{ expanded ? '收起回复区 ▴' : '点击展开回复区 ▾' }}</span>
+        <span v-if="canExpandReplies()" class="post-jump">{{ expanded ? '收起回复区 ▴' : '点击展开回复区 ▾' }}</span>
       </div>
-      <div v-if="expanded" class="reply-list">
-        <div class="reply-item">
-          <div class="r-ava" :style="{ background: post.bg }">{{ post.ava }}</div>
-          <div class="r-body">
-            <div class="r-head">
-              <span class="r-name">{{ post.name }}</span>
-              <span class="r-floor">2楼</span>
-              <span class="r-time">刚刚</span>
-            </div>
-            <div class="r-text">这个楼层是 Vue 状态驱动展开的，后面可以接真实评论接口。</div>
-          </div>
-        </div>
-        <div class="more-floors">查看全部回复 ▾</div>
-      </div>
+      <ReplyPanel
+        v-if="expanded && canExpandReplies()"
+        :post="post"
+        :current-user="currentUser"
+        @notice="emit('notice', $event)"
+        @request-auth="emit('request-auth')"
+        @replied="emit('reply-created', $event)"
+      />
     </div>
   </article>
 </template>

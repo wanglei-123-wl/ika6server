@@ -1,4 +1,4 @@
-import { isMockEnabled, request } from './http';
+import { request } from './http';
 import {
   mockGetGameDetail,
   mockGetGameSource,
@@ -8,28 +8,47 @@ import {
   mockTrackGamePlay,
 } from './mockAdapter';
 import { normalizeDownload, normalizeGame, normalizePage } from './normalizers';
+import { requestWithFallback } from './runtime';
 
 export async function getGameList(params) {
-  const result = isMockEnabled() ? await mockGetGames(params) : await request('/api/games', { params });
+  const result = await requestWithFallback(
+    () => request('/api/games', { params }),
+    () => mockGetGames(params),
+  );
   return normalizePage(result, normalizeGame);
 }
 
 export async function getGameDetail(id) {
-  return normalizeGame(isMockEnabled() ? await mockGetGameDetail(id) : await request(`/api/games/${id}`));
+  return normalizeGame(await requestWithFallback(
+    () => request(`/api/games/${id}`),
+    () => mockGetGameDetail(id),
+  ));
 }
 
 export async function likeGame(id) {
-  return normalizeGame(isMockEnabled() ? await mockLikeGame(id) : await request(`/api/games/${id}/like`, { method: 'POST' }));
+  return normalizeGame(await requestWithFallback(
+    () => request(`/api/games/${id}/like`, { method: 'POST' }),
+    () => mockLikeGame(id),
+  ));
 }
 
 export function trackGamePlay(id) {
-  return isMockEnabled() ? mockTrackGamePlay(id) : request(`/api/games/${id}/play`, { method: 'POST' });
+  return requestWithFallback(
+    () => request(`/api/games/${id}/play`, { method: 'POST' }),
+    () => mockTrackGamePlay(id),
+  );
 }
 
 export async function getGameSource(id) {
-  return normalizeDownload(isMockEnabled() ? await mockGetGameSource(id) : await request(`/api/games/${id}/download-source`));
+  return normalizeDownload(await requestWithFallback(
+    () => request(`/api/games/${id}/download-source`),
+    () => mockGetGameSource(id),
+  ));
 }
 
 export async function submitGame(payload) {
-  return normalizeGame(isMockEnabled() ? await mockSubmitGame(payload) : await request('/api/games', { method: 'POST', body: payload }));
+  return normalizeGame(await requestWithFallback(
+    () => request('/api/games', { method: 'POST', body: payload }),
+    () => mockSubmitGame(payload),
+  ));
 }

@@ -36,12 +36,12 @@ type Store struct {
 	tempDir   string
 	scanner   *scanner.Scanner
 	sandbox   *sandbox.Analyzer
-	blocklist *blocklist.Store
+	blocklist blocklist.Repository
 	byPost    map[int64]File
 	byKey     map[string]File
 }
 
-func NewStore(uploadDir, tempDir string, scanner *scanner.Scanner, sandbox *sandbox.Analyzer, blocklist *blocklist.Store) *Store {
+func NewStore(uploadDir, tempDir string, scanner *scanner.Scanner, sandbox *sandbox.Analyzer, blocklist blocklist.Repository) *Store {
 	return &Store{
 		nextID:    1,
 		uploadDir: uploadDir,

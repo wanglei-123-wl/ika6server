@@ -14,10 +14,18 @@ type Entry struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+type Repository interface {
+	Add(sha256, reason string, createdBy int64) (Entry, error)
+	Contains(sha256 string) (Entry, bool)
+	List() []Entry
+}
+
 type Store struct {
 	mu      sync.RWMutex
 	entries map[string]Entry
 }
+
+var _ Repository = (*Store)(nil)
 
 func NewStore() *Store {
 	return &Store{entries: make(map[string]Entry)}

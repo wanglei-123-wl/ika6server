@@ -33,12 +33,20 @@ type Profile struct {
 	Events    []Event `json:"events"`
 }
 
+type Repository interface {
+	Add(userID int64, eventType EventType, delta int, reason string) Profile
+	Get(userID int64) Profile
+	List() []Profile
+}
+
 type Store struct {
 	mu        sync.RWMutex
 	scores    map[int64]int
 	downloads map[int64]int64
 	events    map[int64][]Event
 }
+
+var _ Repository = (*Store)(nil)
 
 func NewStore() *Store {
 	return &Store{

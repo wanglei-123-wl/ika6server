@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import CreatePostModal from './components/CreatePostModal.vue';
 import AuthModal from './components/AuthModal.vue';
 import UploadGameModal from './components/UploadGameModal.vue';
-import { AUTH_EXPIRED_EVENT, createForumPost, downloadRepo, getDevDocs, getForumBars, getForumPosts, getGameList, getGameSource, getHomeData, getRepoList, likeForumPost, searchSite, trackGamePlay, uploadGame } from './api';
+import { API_FALLBACK_EVENT, AUTH_EXPIRED_EVENT, createForumPost, downloadRepo, getDevDocs, getForumBars, getForumPosts, getGameList, getGameSource, getHomeData, getRepoList, likeForumPost, searchSite, trackGamePlay, uploadGame } from './api';
 import AdminPage from './pages/AdminPage.vue';
 import DevPage from './pages/DevPage.vue';
 import ForumPage from './pages/ForumPage.vue';
@@ -94,7 +94,19 @@ function showToast(message) {
   }, 2400);
 }
 
-function likePost(post) {
+function parseCount(value) {
+  if (typeof value === 'number') return value;
+
+  const text = String(value || '0').trim().toLowerCase().replace(/,/g, '');
+  if (text.endsWith('k')) return Math.round((Number.parseFloat(text) || 0) * 1000);
+  return Number.parseInt(text, 10) || 0;
+}
+
+function incrementReplyCount(post) {
+  post.replies = String(parseCount(post.replies) + 1);
+}
+
+async function likePost(post) {
   if (!currentUser.value) {
     openAuth();
     showToast('请先登录后再点赞');
@@ -103,11 +115,19 @@ function likePost(post) {
 
   post.liked = !post.liked;
   post.likes += post.liked ? 1 : -1;
-  likeForumPost(post.id).catch(() => {
+  try {
+    const result = await likeForumPost(post.id);
+    if (typeof result.liked === 'boolean') post.liked = result.liked;
+    if (result.likes !== undefined) post.likes = Number(result.likes) || 0;
+  } catch {
     post.liked = !post.liked;
     post.likes += post.liked ? 1 : -1;
     showToast('点赞失败，请稍后重试');
-  });
+  }
+}
+
+function handleReplyCreated({ post }) {
+  incrementReplyCount(post);
 }
 
 function openPostModal() {
@@ -184,6 +204,10 @@ function handleAuthExpired() {
   authStore.expireSession();
   accountMenuOpen.value = false;
   showToast('登录已过期，请重新登录');
+}
+
+function handleApiFallback() {
+  showToast('后端暂时不可用，已切换到备用模式');
 }
 
 function accountAction(label) {
@@ -336,6 +360,7 @@ function onKeydown(event) {
 onMounted(() => {
   theme.value = window.localStorage.getItem('pixel-forge-theme') || 'dark';
   window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+  window.addEventListener(API_FALLBACK_EVENT, handleApiFallback);
   authStore.bootstrap();
   loadClientData();
   route();
@@ -347,6 +372,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.clearTimeout(searchTimer);
   window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+  window.removeEventListener(API_FALLBACK_EVENT, handleApiFallback);
   window.removeEventListener('hashchange', route);
   window.removeEventListener('keydown', onKeydown);
   window.removeEventListener('click', closeAccountMenu);
@@ -466,10 +492,14 @@ watch(activeForumCat, async (cat) => {
         :games="homeGames.length ? homeGames : gameList"
         :hot-posts="homeHotPosts.length ? homeHotPosts : postList"
         :feed-posts="homeFeedPosts.length ? homeFeedPosts : postList"
+        :current-user="currentUser"
         @upload="uploadOpen = true"
         @play-game="openPlayer"
         @source="downloadGameSource"
         @like-post="likePost"
+        @notice="showToast"
+        @request-auth="openAuth"
+        @reply-created="handleReplyCreated"
       />
       <GameLibraryPage
         v-else-if="activeView === 'library'"
@@ -484,9 +514,12 @@ watch(activeForumCat, async (cat) => {
         :bars="barList"
         :forum-cats="forumCats"
         :forum-posts="forumPosts"
+        :current-user="currentUser"
         @notice="showToast"
         @create-post="openPostModal"
         @like-post="likePost"
+        @request-auth="openAuth"
+        @reply-created="handleReplyCreated"
       />
       <MarketPage
         v-else-if="activeView === 'market'"

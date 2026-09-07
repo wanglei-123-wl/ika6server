@@ -21,9 +21,13 @@ const props = defineProps({
     type: Array,
     required: true,
   },
+  currentUser: {
+    type: Object,
+    default: null,
+  },
 });
 
-const emit = defineEmits(['upload', 'play-game', 'source', 'like-post']);
+const emit = defineEmits(['upload', 'play-game', 'source', 'like-post', 'notice', 'request-auth', 'reply-created']);
 
 function compact(value) {
   const number = Number(value) || 0;
@@ -90,7 +94,16 @@ const heroStats = computed(() => [
         <div><h2 class="section-title">社区 <span class="accent">帖子流</span></h2><p class="section-sub">点赞和展开回复由 Vue 状态控制</p></div>
       </div>
       <div v-if="feedPosts.length" class="post-list">
-        <PostItem v-for="post in feedPosts.slice(0, 4)" :key="post.title" :post="post" @like="emit('like-post', $event)" />
+        <PostItem
+          v-for="post in feedPosts.slice(0, 4)"
+          :key="post.id || post.title"
+          :post="post"
+          :current-user="currentUser"
+          @like="emit('like-post', $event)"
+          @notice="emit('notice', $event)"
+          @request-auth="emit('request-auth')"
+          @reply-created="emit('reply-created', $event)"
+        />
       </div>
       <StateBlock v-else icon="社" title="暂无社区动态" text="后端没有返回帖子时，页面会保持这个空状态，不会白屏。" />
     </div>

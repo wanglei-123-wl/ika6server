@@ -1,7 +1,11 @@
-import { isMockEnabled, request } from './http';
+import { request } from './http';
 import { mockSearch } from './mockAdapter';
 import { normalizeSearch } from './normalizers';
+import { requestWithFallback } from './runtime';
 
 export async function searchSite(params) {
-  return normalizeSearch(isMockEnabled() ? await mockSearch(params) : await request('/api/search', { params }));
+  return normalizeSearch(await requestWithFallback(
+    () => request('/api/search', { params }),
+    () => mockSearch(params),
+  ));
 }

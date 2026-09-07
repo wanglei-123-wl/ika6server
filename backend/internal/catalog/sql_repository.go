@@ -157,11 +157,40 @@ func (r *SQLRepository) CreateForumPost(ctx context.Context, barID, authorID int
 func (r *SQLRepository) ForumPosts(ctx context.Context) ([]ForumPost, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT p.id, u.username, p.category, p.title, p.content, p.tags,
-		       p.likes, p.views, p.bar_id, p.status
+		       p.likes, p.views, p.bar_id, p.status, COALESCE(c.reply_count, 0)
 		FROM forum_posts p
 		JOIN users u ON u.id = p.author_id
+		LEFT JOIN (
+			SELECT post_id, COUNT(*) AS reply_count
+			FROM comments
+			GROUP BY post_id
+		) c ON c.post_id = p.id
 		WHERE p.status = 'published'
 		ORDER BY p.created_at DESC, p.id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanForumPosts(rows)
+}
+
+func (r *SQLRepository) HotPosts(ctx context.Context) ([]ForumPost, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT p.id, u.username, p.category, p.title, p.content, p.tags,
+		       p.likes, p.views, p.bar_id, p.status, COALESCE(c.reply_count, 0)
+		FROM forum_posts p
+		JOIN users u ON u.id = p.author_id
+		LEFT JOIN (
+			SELECT post_id, COUNT(*) AS reply_count, MAX(created_at) AS last_reply_at
+			FROM comments
+			GROUP BY post_id
+		) c ON c.post_id = p.id
+		WHERE p.status = 'published'
+		  AND (p.created_at >= now() - INTERVAL '24 hours' OR c.last_reply_at >= now() - INTERVAL '24 hours')
+		ORDER BY (p.likes * 5 + p.views + COALESCE(c.reply_count, 0) * 3) DESC,
+		         COALESCE(c.last_reply_at, p.created_at) DESC,
+		         p.id DESC
+		LIMIT 20`)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +203,7 @@ func (r *SQLRepository) Bars(ctx context.Context) ([]Bar, error) {
 		SELECT b.id, b.name, b.description,
 		       COUNT(DISTINCT p.id), COUNT(DISTINCT p.author_id)
 		FROM forum_bars b
-		LEFT JOIN forum_posts p ON p.bar_id = b.id AND p.status <> 'hidden'
+		LEFT JOIN forum_posts p ON p.bar_id = b.id AND p.status = 'published'
 		GROUP BY b.id, b.name, b.description
 		ORDER BY b.id ASC`)
 	if err != nil {
@@ -198,22 +227,55 @@ func (r *SQLRepository) Bars(ctx context.Context) ([]Bar, error) {
 }
 
 func (r *SQLRepository) ForumPost(ctx context.Context, id int64) (ForumPost, error) {
+	if err := r.IncrementForumPostViews(ctx, id); err != nil {
+		return ForumPost{}, err
+	}
+	return r.forumPost(ctx, id, true)
+}
+
+func (r *SQLRepository) ForumPostByID(ctx context.Context, id int64) (ForumPost, error) {
+	return r.forumPost(ctx, id, false)
+}
+
+func (r *SQLRepository) forumPost(ctx context.Context, id int64, publicOnly bool) (ForumPost, error) {
 	var item ForumPost
 	var author, content string
-	var likes, views int64
+	var likes, views, replies int64
 	var tagsJSON []byte
-	err := r.db.QueryRowContext(ctx, `
+	statusFilter := ""
+	if publicOnly {
+		statusFilter = "AND p.status = 'published'"
+	}
+	query := `
 		SELECT p.id, u.username, p.category, p.title, p.content, p.tags,
-		       p.likes, p.views, p.bar_id, p.status
+		       p.likes, p.views, p.bar_id, p.status, COUNT(c.id)
 		FROM forum_posts p
 		JOIN users u ON u.id = p.author_id
-		WHERE p.id = $1 AND p.status <> 'hidden'`, id).
-		Scan(&item.ID, &author, &item.Cat, &item.Title, &content, &tagsJSON, &likes, &views, &item.BarID, &item.Status)
+		LEFT JOIN comments c ON c.post_id = p.id
+		WHERE p.id = $1 ` + statusFilter + `
+		GROUP BY p.id, u.username`
+	err := r.db.QueryRowContext(ctx, query, id).
+		Scan(&item.ID, &author, &item.Cat, &item.Title, &content, &tagsJSON, &likes, &views, &item.BarID, &item.Status, &replies)
 	if err != nil {
 		return ForumPost{}, err
 	}
 	_ = json.Unmarshal(tagsJSON, &item.Tags)
-	return forumPostFromRow(item, author, content, likes, views), nil
+	return forumPostFromRow(item, author, content, likes, views, replies), nil
+}
+
+func (r *SQLRepository) IncrementForumPostViews(ctx context.Context, postID int64) error {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE forum_posts
+		SET views = views + 1, updated_at = now()
+		WHERE id = $1 AND status = 'published'`, postID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err == nil && count == 0 {
+		return sql.ErrNoRows
+	}
+	return err
 }
 
 func (r *SQLRepository) Replies(ctx context.Context, postID int64) ([]Reply, error) {
@@ -221,7 +283,8 @@ func (r *SQLRepository) Replies(ctx context.Context, postID int64) ([]Reply, err
 		SELECT c.id, c.post_id, u.username, c.content, c.created_at, c.likes
 		FROM comments c
 		JOIN users u ON u.id = c.author_id
-		WHERE c.post_id = $1
+		JOIN forum_posts p ON p.id = c.post_id
+		WHERE c.post_id = $1 AND p.status = 'published'
 		ORDER BY c.created_at ASC, c.id ASC`, postID)
 	if err != nil {
 		return nil, err
@@ -234,6 +297,44 @@ func (r *SQLRepository) Replies(ctx context.Context, postID int64) ([]Reply, err
 		var author string
 		var createdAt sql.NullTime
 		if err := rows.Scan(&item.ID, &item.PostID, &author, &item.Content, &createdAt, &item.Likes); err != nil {
+			return nil, err
+		}
+		item.Author = author
+		item.AvatarText = strings.ToUpper(string([]rune(author)[0]))
+		item.Floor = floor
+		item.CreatedAt = "刚刚"
+		if createdAt.Valid {
+			item.CreatedAt = createdAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
+		}
+		items = append(items, item)
+		floor++
+	}
+	return items, rows.Err()
+}
+
+func (r *SQLRepository) RepliesForUser(ctx context.Context, postID, userID int64) ([]Reply, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT c.id, c.post_id, u.username, c.content, c.created_at, c.likes,
+		       EXISTS (
+		         SELECT 1 FROM comment_likes cl
+		         WHERE cl.comment_id = c.id AND cl.user_id = $2
+		       )
+		FROM comments c
+		JOIN users u ON u.id = c.author_id
+		JOIN forum_posts p ON p.id = c.post_id
+		WHERE c.post_id = $1 AND p.status = 'published'
+		ORDER BY c.created_at ASC, c.id ASC`, postID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]Reply, 0)
+	floor := 2
+	for rows.Next() {
+		var item Reply
+		var author string
+		var createdAt sql.NullTime
+		if err := rows.Scan(&item.ID, &item.PostID, &author, &item.Content, &createdAt, &item.Likes, &item.Liked); err != nil {
 			return nil, err
 		}
 		item.Author = author
@@ -271,9 +372,85 @@ func (r *SQLRepository) LikeForumPost(ctx context.Context, postID, userID int64)
 	return true, tx.Commit()
 }
 
+func (r *SQLRepository) LikeReply(ctx context.Context, replyID, userID int64) (Reply, bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Reply{}, false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO comment_likes (comment_id, user_id)
+		SELECT c.id, $2
+		FROM comments c
+		JOIN forum_posts p ON p.id = c.post_id
+		WHERE c.id = $1 AND p.status = 'published'
+		ON CONFLICT (comment_id, user_id) DO NOTHING`, replyID, userID)
+	if err != nil {
+		return Reply{}, false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return Reply{}, false, err
+	}
+	if count == 0 {
+		exists, err := r.replyExists(ctx, replyID)
+		if err != nil {
+			return Reply{}, false, err
+		}
+		if !exists {
+			return Reply{}, false, sql.ErrNoRows
+		}
+		if err := tx.Commit(); err != nil {
+			return Reply{}, false, err
+		}
+		reply, err := r.Reply(ctx, replyID)
+		return reply, false, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE comments SET likes = likes + 1 WHERE id = $1`, replyID); err != nil {
+		return Reply{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Reply{}, false, err
+	}
+	reply, err := r.Reply(ctx, replyID)
+	return reply, true, err
+}
+
+func (r *SQLRepository) replyExists(ctx context.Context, replyID int64) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM comments WHERE id = $1)`, replyID).Scan(&exists)
+	return exists, err
+}
+
+func (r *SQLRepository) Reply(ctx context.Context, replyID int64) (Reply, error) {
+	var item Reply
+	var author string
+	var createdAt sql.NullTime
+	err := r.db.QueryRowContext(ctx, `
+		SELECT c.id, c.post_id, u.username, c.content, c.created_at, c.likes
+		FROM comments c
+		JOIN users u ON u.id = c.author_id
+		JOIN forum_posts p ON p.id = c.post_id
+		WHERE c.id = $1 AND p.status = 'published'`, replyID).
+		Scan(&item.ID, &item.PostID, &author, &item.Content, &createdAt, &item.Likes)
+	if err != nil {
+		return Reply{}, err
+	}
+	item.Author = author
+	item.AvatarText = strings.ToUpper(string([]rune(author)[0]))
+	item.CreatedAt = "刚刚"
+	if createdAt.Valid {
+		item.CreatedAt = createdAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
+	}
+	return item, nil
+}
+
 func (r *SQLRepository) ReviewForumPost(ctx context.Context, postID int64, status string) error {
 	status = strings.ToLower(strings.TrimSpace(status))
-	if status != "approved" && status != "hidden" && status != "rejected" {
+	if status == "approved" {
+		status = "published"
+	}
+	if status != "published" && status != "hidden" && status != "rejected" {
 		return errors.New("invalid post review status")
 	}
 	result, err := r.db.ExecContext(ctx, `UPDATE forum_posts SET status = $1, updated_at = now() WHERE id = $2`, status, postID)
@@ -294,7 +471,9 @@ func (r *SQLRepository) AddReply(ctx context.Context, postID, authorID int64, co
 	var id int64
 	err := r.db.QueryRowContext(ctx, `
 		INSERT INTO comments (post_id, author_id, content)
-		VALUES ($1, $2, $3) RETURNING id`,
+		SELECT id, $2, $3 FROM forum_posts
+		WHERE id = $1 AND status = 'published'
+		RETURNING id`,
 		postID, authorID, strings.TrimSpace(content)).Scan(&id)
 	return id, err
 }
@@ -335,7 +514,12 @@ func (r *SQLRepository) RecordGameFile(ctx context.Context, gameID int64, file G
 	if gameID <= 0 || file.Kind == "" || file.OriginalName == "" || file.StoredName == "" {
 		return errors.New("game and file metadata are required")
 	}
-	_, err := r.db.ExecContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO game_files
 			(game_id, kind, original_name, stored_name, size, sha256, download_url, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -346,8 +530,24 @@ func (r *SQLRepository) RecordGameFile(ctx context.Context, gameID int64, file G
 			sha256 = EXCLUDED.sha256,
 			download_url = EXCLUDED.download_url,
 			status = EXCLUDED.status`,
-		gameID, file.Kind, file.OriginalName, file.StoredName, file.Size, file.SHA256, file.DownloadURL, file.Status)
-	return err
+		gameID, strings.ToLower(strings.TrimSpace(file.Kind)), file.OriginalName, file.StoredName, file.Size, file.SHA256, file.DownloadURL, file.Status); err != nil {
+		return err
+	}
+	updateColumn := ""
+	switch strings.ToLower(strings.TrimSpace(file.Kind)) {
+	case "cover":
+		updateColumn = "cover_url"
+	case "build":
+		updateColumn = "play_url"
+	case "source":
+		updateColumn = "source_url"
+	}
+	if updateColumn != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE games SET `+updateColumn+` = $1, updated_at = now() WHERE id = $2`, file.DownloadURL, gameID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (r *SQLRepository) GameFile(ctx context.Context, gameID int64, kind string) (GameFile, error) {
@@ -359,6 +559,21 @@ func (r *SQLRepository) GameFile(ctx context.Context, gameID int64, kind string)
 		gameID, strings.ToLower(strings.TrimSpace(kind))).
 		Scan(&file.ID, &file.GameID, &file.Kind, &file.OriginalName, &file.StoredName, &file.Size, &file.SHA256, &file.DownloadURL, &file.Status)
 	return file, err
+}
+
+func (r *SQLRepository) IncrementGameFileDownloads(ctx context.Context, gameID int64, kind string) error {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE game_files
+		SET downloads = downloads + 1
+		WHERE game_id = $1 AND kind = $2`, gameID, strings.ToLower(strings.TrimSpace(kind)))
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err == nil && count == 0 {
+		return sql.ErrNoRows
+	}
+	return err
 }
 
 func (r *SQLRepository) DownloadGameSource(ctx context.Context, gameID int64) (GameFile, error) {
@@ -514,9 +729,14 @@ func (r *SQLRepository) searchRepos(ctx context.Context, pattern string) ([]Repo
 func (r *SQLRepository) searchPosts(ctx context.Context, pattern string) ([]ForumPost, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT p.id, u.username, p.category, p.title, p.content, p.tags,
-		       p.likes, p.views, p.bar_id, p.status
+		       p.likes, p.views, p.bar_id, p.status, COALESCE(c.reply_count, 0)
 		FROM forum_posts p
 		JOIN users u ON u.id = p.author_id
+		LEFT JOIN (
+			SELECT post_id, COUNT(*) AS reply_count
+			FROM comments
+			GROUP BY post_id
+		) c ON c.post_id = p.id
 		WHERE p.status = 'published'
 		  AND LOWER(p.title || ' ' || p.content || ' ' || p.category) LIKE $1
 		ORDER BY p.created_at DESC, p.id DESC`, pattern)
@@ -532,18 +752,18 @@ func scanForumPosts(rows *sql.Rows) ([]ForumPost, error) {
 	for rows.Next() {
 		var item ForumPost
 		var author, content string
-		var likes, views int64
+		var likes, views, replies int64
 		var tagsJSON []byte
-		if err := rows.Scan(&item.ID, &author, &item.Cat, &item.Title, &content, &tagsJSON, &likes, &views, &item.BarID, &item.Status); err != nil {
+		if err := rows.Scan(&item.ID, &author, &item.Cat, &item.Title, &content, &tagsJSON, &likes, &views, &item.BarID, &item.Status, &replies); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(tagsJSON, &item.Tags)
-		items = append(items, forumPostFromRow(item, author, content, likes, views))
+		items = append(items, forumPostFromRow(item, author, content, likes, views, replies))
 	}
 	return items, rows.Err()
 }
 
-func forumPostFromRow(item ForumPost, author, content string, likes, views int64) ForumPost {
+func forumPostFromRow(item ForumPost, author, content string, likes, views, replies int64) ForumPost {
 	item.Name = author
 	item.Ava = strings.ToUpper(string([]rune(author)[0]))
 	item.Level = "lv1"
@@ -551,6 +771,7 @@ func forumPostFromRow(item ForumPost, author, content string, likes, views int64
 	item.Excerpt = content
 	item.Likes = likes
 	item.Views = formatCount(views)
+	item.Replies = formatCount(replies)
 	return item
 }
 
