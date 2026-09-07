@@ -25,6 +25,16 @@ type GameFile struct {
 	Status       string `json:"status"`
 }
 
+type PlayDeployment struct {
+	GameID       int64  `json:"gameId"`
+	FileID       int64  `json:"fileId"`
+	RootPath     string `json:"rootPath"`
+	EntryPath    string `json:"entryPath"`
+	PublicURL    string `json:"publicUrl"`
+	Status       string `json:"status"`
+	ErrorMessage string `json:"errorMessage,omitempty"`
+}
+
 func NewSQLRepository(db *sql.DB) (*SQLRepository, error) {
 	if db == nil {
 		return nil, errors.New("sql database is required")
@@ -105,7 +115,7 @@ func (r *SQLRepository) LikeGame(ctx context.Context, gameID, userID int64) (boo
 }
 
 func (r *SQLRepository) PlayGame(ctx context.Context, gameID int64) error {
-	result, err := r.db.ExecContext(ctx, `UPDATE games SET plays = plays + 1, updated_at = now() WHERE id = $1`, gameID)
+	result, err := r.db.ExecContext(ctx, `UPDATE games SET plays = plays + 1, updated_at = now() WHERE id = $1 AND status = 'published'`, gameID)
 	if err != nil {
 		return err
 	}
@@ -134,6 +144,16 @@ func (r *SQLRepository) ReviewGame(ctx context.Context, gameID int64, status str
 	}
 	if err == nil {
 		_, err = r.db.ExecContext(ctx, `UPDATE game_files SET status = $1 WHERE game_id = $2`, status, gameID)
+	}
+	if err == nil {
+		playStatus := "disabled"
+		if status == "published" {
+			playStatus = "ready"
+		}
+		_, err = r.db.ExecContext(ctx, `
+			UPDATE game_play_deployments
+			SET status = $1, updated_at = now()
+			WHERE game_id = $2`, playStatus, gameID)
 	}
 	return err
 }
@@ -279,12 +299,26 @@ func (r *SQLRepository) IncrementForumPostViews(ctx context.Context, postID int6
 }
 
 func (r *SQLRepository) Replies(ctx context.Context, postID int64) ([]Reply, error) {
+	return r.Comments(ctx, postID)
+}
+
+func (r *SQLRepository) Comments(ctx context.Context, postID int64) ([]Reply, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT c.id, c.post_id, u.username, c.content, c.created_at, c.likes
+		SELECT c.id, c.post_id, c.parent_id, c.reply_to_comment_id,
+		       COALESCE(reply_to_author.username, ''), u.username, c.content,
+		       c.created_at, c.likes, COALESCE(child_counts.reply_count, 0)
 		FROM comments c
 		JOIN users u ON u.id = c.author_id
 		JOIN forum_posts p ON p.id = c.post_id
-		WHERE c.post_id = $1 AND p.status = 'published'
+		LEFT JOIN comments reply_to ON reply_to.id = c.reply_to_comment_id
+		LEFT JOIN users reply_to_author ON reply_to_author.id = reply_to.author_id
+		LEFT JOIN (
+			SELECT parent_id, COUNT(*) AS reply_count
+			FROM comments
+			WHERE parent_id IS NOT NULL
+			GROUP BY parent_id
+		) child_counts ON child_counts.parent_id = c.id
+		WHERE c.post_id = $1 AND c.parent_id IS NULL AND p.status = 'published'
 		ORDER BY c.created_at ASC, c.id ASC`, postID)
 	if err != nil {
 		return nil, err
@@ -296,12 +330,16 @@ func (r *SQLRepository) Replies(ctx context.Context, postID int64) ([]Reply, err
 		var item Reply
 		var author string
 		var createdAt sql.NullTime
-		if err := rows.Scan(&item.ID, &item.PostID, &author, &item.Content, &createdAt, &item.Likes); err != nil {
+		var parentID, replyToCommentID sql.NullInt64
+		if err := rows.Scan(&item.ID, &item.PostID, &parentID, &replyToCommentID, &item.ReplyToAuthor, &author, &item.Content, &createdAt, &item.Likes, &item.ReplyCount); err != nil {
 			return nil, err
 		}
+		item.ParentID = nullableInt64(parentID)
+		item.ReplyToCommentID = nullableInt64(replyToCommentID)
 		item.Author = author
 		item.AvatarText = strings.ToUpper(string([]rune(author)[0]))
 		item.Floor = floor
+		item.Replies = []Reply{}
 		item.CreatedAt = "刚刚"
 		if createdAt.Valid {
 			item.CreatedAt = createdAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
@@ -313,8 +351,14 @@ func (r *SQLRepository) Replies(ctx context.Context, postID int64) ([]Reply, err
 }
 
 func (r *SQLRepository) RepliesForUser(ctx context.Context, postID, userID int64) ([]Reply, error) {
+	return r.CommentsForUser(ctx, postID, userID)
+}
+
+func (r *SQLRepository) CommentsForUser(ctx context.Context, postID, userID int64) ([]Reply, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT c.id, c.post_id, u.username, c.content, c.created_at, c.likes,
+		SELECT c.id, c.post_id, c.parent_id, c.reply_to_comment_id,
+		       COALESCE(reply_to_author.username, ''), u.username, c.content,
+		       c.created_at, c.likes, COALESCE(child_counts.reply_count, 0),
 		       EXISTS (
 		         SELECT 1 FROM comment_likes cl
 		         WHERE cl.comment_id = c.id AND cl.user_id = $2
@@ -322,7 +366,15 @@ func (r *SQLRepository) RepliesForUser(ctx context.Context, postID, userID int64
 		FROM comments c
 		JOIN users u ON u.id = c.author_id
 		JOIN forum_posts p ON p.id = c.post_id
-		WHERE c.post_id = $1 AND p.status = 'published'
+		LEFT JOIN comments reply_to ON reply_to.id = c.reply_to_comment_id
+		LEFT JOIN users reply_to_author ON reply_to_author.id = reply_to.author_id
+		LEFT JOIN (
+			SELECT parent_id, COUNT(*) AS reply_count
+			FROM comments
+			WHERE parent_id IS NOT NULL
+			GROUP BY parent_id
+		) child_counts ON child_counts.parent_id = c.id
+		WHERE c.post_id = $1 AND c.parent_id IS NULL AND p.status = 'published'
 		ORDER BY c.created_at ASC, c.id ASC`, postID, userID)
 	if err != nil {
 		return nil, err
@@ -334,12 +386,16 @@ func (r *SQLRepository) RepliesForUser(ctx context.Context, postID, userID int64
 		var item Reply
 		var author string
 		var createdAt sql.NullTime
-		if err := rows.Scan(&item.ID, &item.PostID, &author, &item.Content, &createdAt, &item.Likes, &item.Liked); err != nil {
+		var parentID, replyToCommentID sql.NullInt64
+		if err := rows.Scan(&item.ID, &item.PostID, &parentID, &replyToCommentID, &item.ReplyToAuthor, &author, &item.Content, &createdAt, &item.Likes, &item.ReplyCount, &item.Liked); err != nil {
 			return nil, err
 		}
+		item.ParentID = nullableInt64(parentID)
+		item.ReplyToCommentID = nullableInt64(replyToCommentID)
 		item.Author = author
 		item.AvatarText = strings.ToUpper(string([]rune(author)[0]))
 		item.Floor = floor
+		item.Replies = []Reply{}
 		item.CreatedAt = "刚刚"
 		if createdAt.Valid {
 			item.CreatedAt = createdAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
@@ -348,6 +404,87 @@ func (r *SQLRepository) RepliesForUser(ctx context.Context, postID, userID int64
 		floor++
 	}
 	return items, rows.Err()
+}
+
+func (r *SQLRepository) CommentReplies(ctx context.Context, parentID int64) ([]Reply, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT c.id, c.post_id, c.parent_id, c.reply_to_comment_id,
+		       COALESCE(reply_to_author.username, ''), u.username, c.content,
+		       c.created_at, c.likes, COALESCE(child_counts.reply_count, 0)
+		FROM comments parent
+		JOIN forum_posts p ON p.id = parent.post_id
+		JOIN comments c ON c.parent_id = parent.id
+		JOIN users u ON u.id = c.author_id
+		LEFT JOIN comments reply_to ON reply_to.id = c.reply_to_comment_id
+		LEFT JOIN users reply_to_author ON reply_to_author.id = reply_to.author_id
+		LEFT JOIN (
+			SELECT parent_id, COUNT(*) AS reply_count
+			FROM comments
+			WHERE parent_id IS NOT NULL
+			GROUP BY parent_id
+		) child_counts ON child_counts.parent_id = c.id
+		WHERE parent.id = $1 AND parent.parent_id IS NULL AND p.status = 'published'
+		ORDER BY c.created_at ASC, c.id ASC`, parentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]Reply, 0)
+	floor := 1
+	for rows.Next() {
+		var item Reply
+		var author string
+		var createdAt sql.NullTime
+		var parentID, replyToCommentID sql.NullInt64
+		if err := rows.Scan(&item.ID, &item.PostID, &parentID, &replyToCommentID, &item.ReplyToAuthor, &author, &item.Content, &createdAt, &item.Likes, &item.ReplyCount); err != nil {
+			return nil, err
+		}
+		item.ParentID = nullableInt64(parentID)
+		item.ReplyToCommentID = nullableInt64(replyToCommentID)
+		item.Author = author
+		item.AvatarText = strings.ToUpper(string([]rune(author)[0]))
+		item.Floor = floor
+		item.Replies = []Reply{}
+		item.CreatedAt = "刚刚"
+		if createdAt.Valid {
+			item.CreatedAt = createdAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
+		}
+		items = append(items, item)
+		floor++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		exists, err := r.topLevelCommentExists(ctx, parentID)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, sql.ErrNoRows
+		}
+	}
+	return items, nil
+}
+
+func (r *SQLRepository) CommentRepliesForUser(ctx context.Context, parentID, userID int64) ([]Reply, error) {
+	items, err := r.CommentReplies(ctx, parentID)
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		var liked bool
+		err := r.db.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM comment_likes
+				WHERE comment_id = $1 AND user_id = $2
+			)`, items[index].ID, userID).Scan(&liked)
+		if err != nil {
+			return nil, err
+		}
+		items[index].Liked = liked
+	}
+	return items, nil
 }
 
 func (r *SQLRepository) LikeForumPost(ctx context.Context, postID, userID int64) (bool, error) {
@@ -426,18 +563,32 @@ func (r *SQLRepository) Reply(ctx context.Context, replyID int64) (Reply, error)
 	var item Reply
 	var author string
 	var createdAt sql.NullTime
+	var parentID, replyToCommentID sql.NullInt64
 	err := r.db.QueryRowContext(ctx, `
-		SELECT c.id, c.post_id, u.username, c.content, c.created_at, c.likes
+		SELECT c.id, c.post_id, c.parent_id, c.reply_to_comment_id,
+		       COALESCE(reply_to_author.username, ''), u.username, c.content,
+		       c.created_at, c.likes, COALESCE(child_counts.reply_count, 0)
 		FROM comments c
 		JOIN users u ON u.id = c.author_id
 		JOIN forum_posts p ON p.id = c.post_id
+		LEFT JOIN comments reply_to ON reply_to.id = c.reply_to_comment_id
+		LEFT JOIN users reply_to_author ON reply_to_author.id = reply_to.author_id
+		LEFT JOIN (
+			SELECT parent_id, COUNT(*) AS reply_count
+			FROM comments
+			WHERE parent_id IS NOT NULL
+			GROUP BY parent_id
+		) child_counts ON child_counts.parent_id = c.id
 		WHERE c.id = $1 AND p.status = 'published'`, replyID).
-		Scan(&item.ID, &item.PostID, &author, &item.Content, &createdAt, &item.Likes)
+		Scan(&item.ID, &item.PostID, &parentID, &replyToCommentID, &item.ReplyToAuthor, &author, &item.Content, &createdAt, &item.Likes, &item.ReplyCount)
 	if err != nil {
 		return Reply{}, err
 	}
+	item.ParentID = nullableInt64(parentID)
+	item.ReplyToCommentID = nullableInt64(replyToCommentID)
 	item.Author = author
 	item.AvatarText = strings.ToUpper(string([]rune(author)[0]))
+	item.Replies = []Reply{}
 	item.CreatedAt = "刚刚"
 	if createdAt.Valid {
 		item.CreatedAt = createdAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
@@ -465,17 +616,62 @@ func (r *SQLRepository) ReviewForumPost(ctx context.Context, postID int64, statu
 }
 
 func (r *SQLRepository) AddReply(ctx context.Context, postID, authorID int64, content string) (int64, error) {
+	return r.AddComment(ctx, postID, authorID, content, nil, nil)
+}
+
+func (r *SQLRepository) AddComment(ctx context.Context, postID, authorID int64, content string, parentID, replyToCommentID *int64) (int64, error) {
 	if postID <= 0 || authorID <= 0 || strings.TrimSpace(content) == "" {
 		return 0, errors.New("post, author and content are required")
 	}
 	var id int64
+	if parentID != nil {
+		replyTargetID := *parentID
+		if replyToCommentID != nil {
+			replyTargetID = *replyToCommentID
+		}
+		err := r.db.QueryRowContext(ctx, `
+			WITH parent_comment AS (
+				SELECT c.id, c.post_id
+				FROM comments c
+				JOIN forum_posts p ON p.id = c.post_id
+				WHERE c.id = $4
+				  AND c.post_id = $1
+				  AND c.parent_id IS NULL
+				  AND p.status = 'published'
+			),
+			reply_target AS (
+				SELECT c.id, c.post_id, c.parent_id
+				FROM comments c
+				WHERE c.id = $5
+			)
+			INSERT INTO comments (post_id, author_id, content, parent_id, reply_to_comment_id)
+			SELECT $1, $2, $3, parent_comment.id, reply_target.id
+			FROM parent_comment
+			JOIN reply_target ON reply_target.post_id = parent_comment.post_id
+			 AND (reply_target.id = parent_comment.id OR reply_target.parent_id = parent_comment.id)
+			RETURNING id`,
+			postID, authorID, strings.TrimSpace(content), *parentID, replyTargetID).Scan(&id)
+		return id, err
+	}
 	err := r.db.QueryRowContext(ctx, `
-		INSERT INTO comments (post_id, author_id, content)
-		SELECT id, $2, $3 FROM forum_posts
+		INSERT INTO comments (post_id, author_id, content, parent_id, reply_to_comment_id)
+		SELECT id, $2, $3, NULL, NULL FROM forum_posts
 		WHERE id = $1 AND status = 'published'
 		RETURNING id`,
 		postID, authorID, strings.TrimSpace(content)).Scan(&id)
 	return id, err
+}
+
+func (r *SQLRepository) topLevelCommentExists(ctx context.Context, commentID int64) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM comments c
+			JOIN forum_posts p ON p.id = c.post_id
+			WHERE c.id = $1 AND c.parent_id IS NULL AND p.status = 'published'
+		)`, commentID).Scan(&exists)
+	return exists, err
 }
 
 func (r *SQLRepository) Repositories(ctx context.Context) ([]Repo, error) {
@@ -550,12 +746,63 @@ func (r *SQLRepository) RecordGameFile(ctx context.Context, gameID int64, file G
 	return tx.Commit()
 }
 
+func (r *SQLRepository) RecordPlayDeployment(ctx context.Context, deployment PlayDeployment) error {
+	if deployment.GameID <= 0 || strings.TrimSpace(deployment.RootPath) == "" || strings.TrimSpace(deployment.EntryPath) == "" || strings.TrimSpace(deployment.PublicURL) == "" {
+		return errors.New("play deployment metadata is required")
+	}
+	status := strings.TrimSpace(deployment.Status)
+	if status == "" {
+		status = "reviewing"
+	}
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO game_play_deployments
+			(game_id, file_id, root_path, entry_path, public_url, status, error_message)
+		VALUES ($1, NULLIF($2, 0), $3, $4, $5, $6, $7)
+		ON CONFLICT (game_id) DO UPDATE SET
+			file_id = EXCLUDED.file_id,
+			root_path = EXCLUDED.root_path,
+			entry_path = EXCLUDED.entry_path,
+			public_url = EXCLUDED.public_url,
+			status = EXCLUDED.status,
+			error_message = EXCLUDED.error_message,
+			updated_at = now()`,
+		deployment.GameID, deployment.FileID, deployment.RootPath, deployment.EntryPath, deployment.PublicURL, status, deployment.ErrorMessage)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx, `UPDATE games SET play_url = $1, updated_at = now() WHERE id = $2`, deployment.PublicURL, deployment.GameID)
+	return err
+}
+
+func (r *SQLRepository) ReadyPlayDeployment(ctx context.Context, gameID int64) (PlayDeployment, error) {
+	var item PlayDeployment
+	err := r.db.QueryRowContext(ctx, `
+		SELECT d.game_id, COALESCE(d.file_id, 0), d.root_path, d.entry_path, d.public_url, d.status, d.error_message
+		FROM game_play_deployments d
+		JOIN games g ON g.id = d.game_id
+		WHERE d.game_id = $1 AND d.status = 'ready' AND g.status = 'published'`, gameID).
+		Scan(&item.GameID, &item.FileID, &item.RootPath, &item.EntryPath, &item.PublicURL, &item.Status, &item.ErrorMessage)
+	return item, err
+}
+
 func (r *SQLRepository) GameFile(ctx context.Context, gameID int64, kind string) (GameFile, error) {
 	var file GameFile
 	err := r.db.QueryRowContext(ctx, `
 		SELECT id, game_id, kind, original_name, stored_name, size, sha256, download_url, status
 		FROM game_files
 		WHERE game_id = $1 AND kind = $2`,
+		gameID, strings.ToLower(strings.TrimSpace(kind))).
+		Scan(&file.ID, &file.GameID, &file.Kind, &file.OriginalName, &file.StoredName, &file.Size, &file.SHA256, &file.DownloadURL, &file.Status)
+	return file, err
+}
+
+func (r *SQLRepository) PublishedGameFile(ctx context.Context, gameID int64, kind string) (GameFile, error) {
+	var file GameFile
+	err := r.db.QueryRowContext(ctx, `
+		SELECT f.id, f.game_id, f.kind, f.original_name, f.stored_name, f.size, f.sha256, f.download_url, f.status
+		FROM game_files f
+		JOIN games g ON g.id = f.game_id
+		WHERE f.game_id = $1 AND f.kind = $2 AND f.status = 'published' AND g.status = 'published'`,
 		gameID, strings.ToLower(strings.TrimSpace(kind))).
 		Scan(&file.ID, &file.GameID, &file.Kind, &file.OriginalName, &file.StoredName, &file.Size, &file.SHA256, &file.DownloadURL, &file.Status)
 	return file, err
@@ -807,6 +1054,13 @@ func scanRepo(row rowScanner) (Repo, error) {
 	item.Icon = "◆"
 	item.Downloads = formatCount(downloads)
 	return item, nil
+}
+
+func nullableInt64(value sql.NullInt64) *int64 {
+	if !value.Valid {
+		return nil
+	}
+	return &value.Int64
 }
 
 func formatCount(value int64) string {

@@ -126,10 +126,18 @@ export function normalizeBar(raw = {}) {
 
 export function normalizeReply(raw = {}) {
   const author = pick(raw, ['author', 'name', 'authorName', 'author_name'], '匿名玩家');
+  const children = toArray(pick(raw, ['children', 'replies', 'replyItems', 'reply_items'], []));
+  const replyTo = pick(raw, ['replyTo', 'reply_to', 'replyToUser', 'reply_to_user'], null);
 
   return {
     id: pick(raw, ['id', 'replyId', 'reply_id'], ''),
     postId: pick(raw, ['postId', 'post_id'], ''),
+    parentId: pick(raw, ['parentId', 'parent_id'], ''),
+    replyToCommentId: pick(raw, ['replyToCommentId', 'reply_to_comment_id'], ''),
+    replyToUserId: pick(raw, ['replyToUserId', 'reply_to_user_id'], ''),
+    replyToAuthor: pick(raw, ['replyToAuthor', 'reply_to_author'], typeof replyTo === 'string'
+      ? replyTo
+      : pick(replyTo, ['author', 'name', 'username', 'nickname'], '')),
     author,
     avatarText: pick(raw, ['avatarText', 'avatar_text'], String(author).charAt(0).toUpperCase() || 'U'),
     floor: pick(raw, ['floor', 'floorNo', 'floor_no'], ''),
@@ -137,6 +145,8 @@ export function normalizeReply(raw = {}) {
     createdAt: pick(raw, ['createdAt', 'created_at', 'time'], ''),
     likes: Number(pick(raw, ['likes', 'likeCount', 'like_count'], 0)),
     liked: Boolean(pick(raw, ['liked', 'isLiked', 'is_liked'], false)),
+    replies: children.map(normalizeReply),
+    replyCount: Number(pick(raw, ['replyCount', 'reply_count', 'childrenCount', 'children_count'], children.length)),
   };
 }
 

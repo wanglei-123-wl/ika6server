@@ -71,3 +71,29 @@ func TestAdminAuditLogsMigrationExists(t *testing.T) {
 		}
 	}
 }
+
+func TestThreadedCommentsMigrationExists(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "migrations", "007_threaded_comments.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(content)
+	for _, fragment := range []string{"parent_id BIGINT REFERENCES comments(id)", "reply_to_comment_id BIGINT REFERENCES comments(id)", "idx_comments_parent_created_at"} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("threaded comments migration is missing %q", fragment)
+		}
+	}
+}
+
+func TestGamePlayDeploymentsMigrationExists(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "migrations", "008_game_play_deployments.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(content)
+	for _, fragment := range []string{"CREATE TABLE IF NOT EXISTS game_play_deployments", "public_url TEXT NOT NULL", "idx_game_play_deployments_status"} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("game play deployments migration is missing %q", fragment)
+		}
+	}
+}

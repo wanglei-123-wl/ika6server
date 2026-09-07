@@ -12,6 +12,7 @@ type Config struct {
 	BootstrapAdminAccount string
 	UploadDir             string
 	TempDir               string
+	PlayDir               string
 	TokenSecret           string
 	ClamScanBin           string
 	ClamAVDBDir           string
@@ -31,6 +32,7 @@ func Load() Config {
 		BootstrapAdminAccount: os.Getenv("IKA6_BOOTSTRAP_ADMIN_ACCOUNT"),
 		UploadDir:             env("IKA6_UPLOAD_DIR", filepath.Join(root, "..", "storage", "uploads")),
 		TempDir:               env("IKA6_TEMP_DIR", filepath.Join(root, "..", "storage", "tmp")),
+		PlayDir:               env("IKA6_PLAY_DIR", filepath.Join(root, "..", "storage", "play")),
 		TokenSecret:           env("IKA6_TOKEN_SECRET", "dev-secret-change-me"),
 		ClamScanBin:           env("IKA6_CLAMSCAN_BIN", `C:\Program Files\ClamAV\clamscan.exe`),
 		ClamAVDBDir:           env("IKA6_CLAMAV_DB_DIR", filepath.Join(root, "..", "storage", "clamav-db")),

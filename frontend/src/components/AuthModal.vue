@@ -64,12 +64,43 @@ function isValidAccount(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) || /^1[3-9]\d{9}$/.test(value);
 }
 
+function applyServerError(error, mode) {
+  const errorCode = error?.errorCode;
+  const message = String(error?.message || '').toLowerCase();
+  const nextErrors = {};
+
+  if (mode === 'login' && (
+    errorCode === 'INVALID_CREDENTIALS'
+    || error?.status === 401
+    || message.includes('invalid email or password')
+  )) {
+    nextErrors.loginPassword = '邮箱或密码错误';
+  } else if (mode === 'register') {
+    if (errorCode === 'EMAIL_EXISTS' || message.includes('email already exists')) {
+      nextErrors.registerAccount = '该邮箱已注册';
+    } else if (errorCode === 'VALIDATION_ERROR' && message.includes('password')) {
+      nextErrors.registerPassword = '密码格式不符合要求';
+    } else if (message.includes('password must be at least 8')) {
+      nextErrors.registerPassword = '密码至少 8 位';
+    } else if (message.includes('username, email and password are required')) {
+      nextErrors.registerAccount = '请完整填写注册信息';
+    }
+  }
+
+  if (Object.keys(nextErrors).length) {
+    errors.value = { ...errors.value, ...nextErrors };
+    return;
+  }
+
+  emit('notice', mode === 'login' ? '登录失败，请稍后重试' : '注册失败，请稍后重试');
+}
+
 async function submitLogin() {
   const nextErrors = {};
   const account = loginAccount.value.trim();
 
   if (!isValidAccount(account)) nextErrors.loginAccount = '请输入有效的邮箱或手机号';
-  if (loginPassword.value.length < 6) nextErrors.loginPassword = '密码至少 6 位';
+  if (loginPassword.value.length < 8) nextErrors.loginPassword = '密码至少 8 位';
 
   errors.value = nextErrors;
   if (Object.keys(nextErrors).length || loading.value) return;
@@ -83,7 +114,7 @@ async function submitLogin() {
     });
     emit('authenticated', result.user);
   } catch (error) {
-    emit('notice', error.message || '登录失败，请稍后重试');
+    applyServerError(error, 'login');
   } finally {
     loading.value = false;
   }
@@ -96,7 +127,7 @@ async function submitRegister() {
 
   if (name.length < 2) nextErrors.registerName = '昵称至少 2 个字符';
   if (!isValidAccount(account)) nextErrors.registerAccount = '请输入有效的邮箱或手机号';
-  if (registerPassword.value.length < 6) nextErrors.registerPassword = '密码至少 6 位';
+  if (registerPassword.value.length < 8) nextErrors.registerPassword = '密码至少 8 位';
   if (registerPasswordConfirm.value !== registerPassword.value) nextErrors.registerPasswordConfirm = '两次输入的密码不一致';
 
   errors.value = nextErrors;
@@ -115,7 +146,7 @@ async function submitRegister() {
     });
     emit('authenticated', result.user);
   } catch (error) {
-    emit('notice', error.message || '注册失败，请稍后重试');
+    applyServerError(error, 'register');
   } finally {
     loading.value = false;
   }
@@ -129,7 +160,7 @@ async function socialLogin(provider) {
     const result = await authStore.loginWithProvider(provider);
     emit('authenticated', result.user);
   } catch (error) {
-    emit('notice', error.message || `${provider} 登录失败`);
+    emit('notice', '第三方登录失败，请稍后重试');
   } finally {
     loading.value = false;
   }
@@ -152,13 +183,13 @@ async function socialLogin(provider) {
         <form v-if="tab === 'login'" class="auth-pane" @submit.prevent="submitLogin">
           <div class="auth-field" :class="{ invalid: errors.loginAccount }">
             <label for="login-account">邮箱 / 手机号</label>
-            <input id="login-account" v-model="loginAccount" class="auth-input" type="text" autocomplete="username" placeholder="you@pixelforge.dev" />
+            <input id="login-account" v-model="loginAccount" class="auth-input" type="text" autocomplete="username" placeholder="请输入邮箱或手机号" />
             <span v-if="errors.loginAccount" class="auth-error">{{ errors.loginAccount }}</span>
           </div>
           <div class="auth-field" :class="{ invalid: errors.loginPassword }">
             <label for="login-password">密码</label>
             <div class="auth-input-wrap">
-              <input id="login-password" v-model="loginPassword" class="auth-input" :type="showLoginPassword ? 'text' : 'password'" autocomplete="current-password" placeholder="至少 6 位" />
+              <input id="login-password" v-model="loginPassword" class="auth-input" :type="showLoginPassword ? 'text' : 'password'" autocomplete="current-password" placeholder="至少 8 位" />
               <button type="button" class="auth-eye" :aria-label="showLoginPassword ? '隐藏密码' : '显示密码'" @click="showLoginPassword = !showLoginPassword">{{ showLoginPassword ? '隐藏' : '显示' }}</button>
             </div>
             <span v-if="errors.loginPassword" class="auth-error">{{ errors.loginPassword }}</span>
@@ -187,13 +218,13 @@ async function socialLogin(provider) {
           </div>
           <div class="auth-field" :class="{ invalid: errors.registerAccount }">
             <label for="register-account">邮箱 / 手机号</label>
-            <input id="register-account" v-model="registerAccount" class="auth-input" type="text" autocomplete="email" placeholder="you@pixelforge.dev" />
+            <input id="register-account" v-model="registerAccount" class="auth-input" type="text" autocomplete="email" placeholder="请输入邮箱或手机号" />
             <span v-if="errors.registerAccount" class="auth-error">{{ errors.registerAccount }}</span>
           </div>
           <div class="auth-field" :class="{ invalid: errors.registerPassword }">
             <label for="register-password">密码</label>
             <div class="auth-input-wrap">
-              <input id="register-password" v-model="registerPassword" class="auth-input" :type="showRegisterPassword ? 'text' : 'password'" autocomplete="new-password" placeholder="至少 6 位" />
+              <input id="register-password" v-model="registerPassword" class="auth-input" :type="showRegisterPassword ? 'text' : 'password'" autocomplete="new-password" placeholder="至少 8 位" />
               <button type="button" class="auth-eye" :aria-label="showRegisterPassword ? '隐藏密码' : '显示密码'" @click="showRegisterPassword = !showRegisterPassword">{{ showRegisterPassword ? '隐藏' : '显示' }}</button>
             </div>
             <span v-if="errors.registerPassword" class="auth-error">{{ errors.registerPassword }}</span>

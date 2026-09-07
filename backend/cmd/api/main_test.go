@@ -6,6 +6,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/wanglei-123-wl/ika6server/backend/internal/catalog"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/config"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/database"
+	playdeploy "github.com/wanglei-123-wl/ika6server/backend/internal/play"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/posts"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/reputation"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/users"
@@ -28,6 +31,7 @@ func testApp() *app {
 		users:      userStore,
 		auth:       auth.NewService(userStore, "test-secret"),
 		posts:      posts.NewStore(),
+		play:       playdeploy.NewService(""),
 		auditLog:   audit.NewMemoryLogger(),
 		catalog:    catalog.NewStore(),
 		reputation: reputation.NewStore(),
@@ -120,6 +124,9 @@ func TestAuthMeRequiresBearerToken(t *testing.T) {
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
+	if !strings.Contains(recorder.Body.String(), `"errorCode":"INVALID_TOKEN"`) {
+		t.Fatalf("missing token error code missing: %s", recorder.Body.String())
+	}
 }
 
 func TestLoginRejectsWrongPassword(t *testing.T) {
@@ -134,6 +141,9 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong password login status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
+	if !strings.Contains(recorder.Body.String(), `"errorCode":"INVALID_CREDENTIALS"`) {
+		t.Fatalf("wrong password error code missing: %s", recorder.Body.String())
+	}
 }
 
 func TestLoginRejectsWrongAccountWithKnownPassword(t *testing.T) {
@@ -147,6 +157,26 @@ func TestLoginRejectsWrongAccountWithKnownPassword(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong account login status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"errorCode":"INVALID_CREDENTIALS"`) {
+		t.Fatalf("wrong account error code missing: %s", recorder.Body.String())
+	}
+}
+
+func TestRegisterRejectsDuplicateEmailWithStableErrorCode(t *testing.T) {
+	a := testApp()
+	handler := testHandler(a)
+	_ = registerTestUserWithCredentials(t, handler, "builder", "builder@test.com")
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(`{"name":"another","account":"builder@test.com","password":"12345678"}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("duplicate email status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"errorCode":"EMAIL_EXISTS"`) {
+		t.Fatalf("duplicate email error code missing: %s", recorder.Body.String())
 	}
 }
 
@@ -341,6 +371,64 @@ func TestPhaseTwoInteractions(t *testing.T) {
 		t.Fatalf("reply list did not include current user like state: %d %s", replyList.Code, replyList.Body.String())
 	}
 
+	comment := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/forum/posts/2/comments", strings.NewReader(`{"content":"一级评论"}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(comment, request)
+	if comment.Code != http.StatusCreated || !strings.Contains(comment.Body.String(), `"parentId":null`) {
+		t.Fatalf("comment failed: %d %s", comment.Code, comment.Body.String())
+	}
+	var commentEnvelope struct {
+		Data struct {
+			ID int64 `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(comment.Body.Bytes(), &commentEnvelope); err != nil {
+		t.Fatal(err)
+	}
+
+	commentReply := httptest.NewRecorder()
+	commentID := catalog.IDString(commentEnvelope.Data.ID)
+	request = httptest.NewRequest(http.MethodPost, "/api/forum/posts/2/comments", strings.NewReader(`{"content":"二级回复","parentId":`+commentID+`,"replyToCommentId":`+commentID+`,"replyToAuthor":"builder"}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(commentReply, request)
+	if commentReply.Code != http.StatusCreated || !strings.Contains(commentReply.Body.String(), `"parentId":`+commentID) || !strings.Contains(commentReply.Body.String(), `"replyToAuthor":"builder"`) {
+		t.Fatalf("comment reply failed: %d %s", commentReply.Code, commentReply.Body.String())
+	}
+	var commentReplyEnvelope struct {
+		Data struct {
+			ID int64 `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(commentReply.Body.Bytes(), &commentReplyEnvelope); err != nil {
+		t.Fatal(err)
+	}
+
+	commentReplyLike := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/forum/comments/"+catalog.IDString(commentReplyEnvelope.Data.ID)+"/like", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(commentReplyLike, request)
+	if commentReplyLike.Code != http.StatusOK || !strings.Contains(commentReplyLike.Body.String(), `"likes":1`) || !strings.Contains(commentReplyLike.Body.String(), `"changed":true`) {
+		t.Fatalf("comment reply like failed: %d %s", commentReplyLike.Code, commentReplyLike.Body.String())
+	}
+
+	commentReplies := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/forum/comments/"+catalog.IDString(commentEnvelope.Data.ID)+"/replies?page=1&pageSize=20", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(commentReplies, request)
+	if commentReplies.Code != http.StatusOK || !strings.Contains(commentReplies.Body.String(), `"liked":true`) || !strings.Contains(commentReplies.Body.String(), `"replyToCommentId":`+commentID) {
+		t.Fatalf("comment replies failed: %d %s", commentReplies.Code, commentReplies.Body.String())
+	}
+
+	comments := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/forum/posts/2/comments?page=1&pageSize=20", nil)
+	handler.ServeHTTP(comments, request)
+	if comments.Code != http.StatusOK || !strings.Contains(comments.Body.String(), `"replyCount":1`) {
+		t.Fatalf("comments list failed: %d %s", comments.Code, comments.Body.String())
+	}
+
 	game := httptest.NewRecorder()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -356,6 +444,149 @@ func TestPhaseTwoInteractions(t *testing.T) {
 	handler.ServeHTTP(game, request)
 	if game.Code != http.StatusCreated || !strings.Contains(game.Body.String(), `"status":"reviewing"`) {
 		t.Fatalf("game submission failed: %d %s", game.Code, game.Body.String())
+	}
+}
+
+func TestThreadedCommentGuards(t *testing.T) {
+	a := testApp()
+	handler := testHandler(a)
+	token := registerTestUserWithCredentials(t, handler, "builder", "builder@test.com")
+
+	unauthorizedCreate := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/forum/posts/1/comments", strings.NewReader(`{"content":"未登录评论"}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(unauthorizedCreate, request)
+	if unauthorizedCreate.Code != http.StatusUnauthorized || !strings.Contains(unauthorizedCreate.Body.String(), `"errorCode":"INVALID_TOKEN"`) {
+		t.Fatalf("unauthorized comment status = %d, body = %s", unauthorizedCreate.Code, unauthorizedCreate.Body.String())
+	}
+
+	parentID := createThreadedComment(t, handler, token, 1, `{"content":"一级评论"}`)
+	childID := createThreadedComment(t, handler, token, 1, `{"content":"二级回复","parentId":`+catalog.IDString(parentID)+`,"replyToCommentId":`+catalog.IDString(parentID)+`}`)
+
+	grandchild := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/forum/posts/1/comments", strings.NewReader(`{"content":"三级回复","parentId":`+catalog.IDString(childID)+`,"replyToCommentId":`+catalog.IDString(childID)+`}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(grandchild, request)
+	if grandchild.Code != http.StatusBadRequest {
+		t.Fatalf("grandchild comment status = %d, body = %s", grandchild.Code, grandchild.Body.String())
+	}
+
+	wrongTarget := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/forum/posts/1/comments", strings.NewReader(`{"content":"错误目标","parentId":`+catalog.IDString(parentID)+`,"replyToCommentId":99999}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(wrongTarget, request)
+	if wrongTarget.Code != http.StatusBadRequest {
+		t.Fatalf("wrong reply target status = %d, body = %s", wrongTarget.Code, wrongTarget.Body.String())
+	}
+
+	childReplies := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/forum/comments/"+catalog.IDString(childID)+"/replies", nil)
+	handler.ServeHTTP(childReplies, request)
+	if childReplies.Code != http.StatusNotFound {
+		t.Fatalf("child replies status = %d, body = %s", childReplies.Code, childReplies.Body.String())
+	}
+
+	unauthorizedLike := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/forum/comments/"+catalog.IDString(parentID)+"/like", nil)
+	handler.ServeHTTP(unauthorizedLike, request)
+	if unauthorizedLike.Code != http.StatusUnauthorized || !strings.Contains(unauthorizedLike.Body.String(), `"errorCode":"INVALID_TOKEN"`) {
+		t.Fatalf("unauthorized comment like status = %d, body = %s", unauthorizedLike.Code, unauthorizedLike.Body.String())
+	}
+
+	invalidTokenRead := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/forum/posts/1/comments", nil)
+	request.Header.Set("Authorization", "Bearer invalid-token")
+	handler.ServeHTTP(invalidTokenRead, request)
+	if invalidTokenRead.Code != http.StatusUnauthorized || !strings.Contains(invalidTokenRead.Body.String(), `"errorCode":"INVALID_TOKEN"`) {
+		t.Fatalf("invalid token read status = %d, body = %s", invalidTokenRead.Code, invalidTokenRead.Body.String())
+	}
+}
+
+func TestPlayAssetRequiresPublishedGame(t *testing.T) {
+	a := testApp()
+	a.config.PlayDir = t.TempDir()
+	a.play = playdeploy.NewService(a.config.PlayDir)
+	handler := testHandler(a)
+	token := registerTestUserWithCredentials(t, handler, "player", "player@test.com")
+	game, err := a.catalog.AddGame("@builder", "试玩游戏", "summary", "Phaser", "Arcade", "MIT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(a.config.PlayDir, catalog.IDString(game.ID)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.config.PlayDir, catalog.IDString(game.ID), "index.html"), []byte("<h1>play</h1>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.catalog.SetGamePlayURL(game.ID, "/play/games/"+catalog.IDString(game.ID)+"/index.html"); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeReview := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/play/games/"+catalog.IDString(game.ID)+"/index.html", nil)
+	handler.ServeHTTP(beforeReview, request)
+	if beforeReview.Code != http.StatusNotFound {
+		t.Fatalf("unpublished play asset status = %d, body = %s", beforeReview.Code, beforeReview.Body.String())
+	}
+
+	playBeforeReview := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/games/"+catalog.IDString(game.ID)+"/play", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(playBeforeReview, request)
+	if playBeforeReview.Code != http.StatusNotFound {
+		t.Fatalf("unpublished play status = %d, body = %s", playBeforeReview.Code, playBeforeReview.Body.String())
+	}
+
+	if _, err := a.catalog.ReviewGame(game.ID, "approved"); err != nil {
+		t.Fatal(err)
+	}
+	afterReview := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/play/games/"+catalog.IDString(game.ID)+"/index.html", nil)
+	handler.ServeHTTP(afterReview, request)
+	if afterReview.Code != http.StatusOK || !strings.Contains(afterReview.Body.String(), "play") {
+		t.Fatalf("published play asset status = %d, body = %s", afterReview.Code, afterReview.Body.String())
+	}
+
+	playAfterReview := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/games/"+catalog.IDString(game.ID)+"/play", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(playAfterReview, request)
+	if playAfterReview.Code != http.StatusOK || !strings.Contains(playAfterReview.Body.String(), `"playUrl":"/play/games/`) {
+		t.Fatalf("published play status = %d, body = %s", playAfterReview.Code, playAfterReview.Body.String())
+	}
+}
+
+func TestGameSourceRequiresPublishedGame(t *testing.T) {
+	a := testApp()
+	handler := testHandler(a)
+	token := registerTestUserWithCredentials(t, handler, "player", "player@test.com")
+	game, err := a.catalog.AddGame("@builder", "源码游戏", "summary", "Godot", "Puzzle", "MIT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.catalog.SetGameFileURL(game.ID, "source", "/api/games/"+catalog.IDString(game.ID)+"/files/source"); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeReview := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/games/"+catalog.IDString(game.ID)+"/download-source", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(beforeReview, request)
+	if beforeReview.Code != http.StatusNotFound {
+		t.Fatalf("unpublished source status = %d, body = %s", beforeReview.Code, beforeReview.Body.String())
+	}
+
+	if _, err := a.catalog.ReviewGame(game.ID, "approved"); err != nil {
+		t.Fatal(err)
+	}
+	afterReview := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/games/"+catalog.IDString(game.ID)+"/download-source", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(afterReview, request)
+	if afterReview.Code != http.StatusOK || !strings.Contains(afterReview.Body.String(), `"downloadUrl"`) {
+		t.Fatalf("published source status = %d, body = %s", afterReview.Code, afterReview.Body.String())
 	}
 }
 
@@ -486,4 +717,25 @@ func registerTestUserWithCredentials(t *testing.T, handler http.Handler, name, a
 		t.Fatal(err)
 	}
 	return envelope.Data.Token
+}
+
+func createThreadedComment(t *testing.T, handler http.Handler, token string, postID int64, body string) int64 {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/forum/posts/"+catalog.IDString(postID)+"/comments", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create threaded comment status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var envelope struct {
+		Data struct {
+			ID int64 `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	return envelope.Data.ID
 }

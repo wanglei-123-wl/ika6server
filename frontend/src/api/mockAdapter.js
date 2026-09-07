@@ -266,20 +266,39 @@ export async function mockCreateReply(postId, payload) {
   const actor = getActor();
   const key = String(postId);
   const items = replyItems.get(key) || [];
+  const parentId = payload.parentId || '';
   const reply = {
     id: Date.now(),
     postId: Number(postId),
+    parentId,
+    replyToCommentId: payload.replyToCommentId || '',
+    replyToAuthor: payload.replyToAuthor || '',
     author: actor.name,
     avatarText: actor.initial,
-    floor: items.length + 2,
+    floor: parentId ? '' : items.length + 2,
     content: payload.content,
     createdAt: '刚刚',
     likes: 0,
     liked: false,
+    replies: [],
+    replyCount: 0,
   };
   const post = postItems.find((item) => String(item.id) === key);
 
-  replyItems.set(key, [...items, reply]);
+  if (parentId) {
+    const nextItems = items.map((item) => {
+      if (String(item.id) !== String(parentId)) return item;
+      const replies = item.replies || [];
+      return {
+        ...item,
+        replies: [...replies, reply],
+        replyCount: toNumber(item.replyCount) + 1,
+      };
+    });
+    replyItems.set(key, nextItems);
+  } else {
+    replyItems.set(key, [...items, reply]);
+  }
   if (post) post.replies = String(toNumber(post.replies) + 1);
 
   return clone(reply);
@@ -289,7 +308,18 @@ export async function mockLikeReply(replyId) {
   await wait(160);
 
   for (const items of replyItems.values()) {
-    const reply = items.find((item) => String(item.id) === String(replyId));
+    const stack = [...items];
+    let reply = null;
+
+    while (stack.length) {
+      const current = stack.shift();
+      if (String(current.id) === String(replyId)) {
+        reply = current;
+        break;
+      }
+      stack.push(...(current.replies || []));
+    }
+
     if (!reply) continue;
 
     if (!reply.liked) {

@@ -36,6 +36,8 @@ const authOpen = ref(false);
 const accountMenuOpen = ref(false);
 const playerOpen = ref(false);
 const currentGame = ref(null);
+const currentPlayUrl = ref('');
+const playerLoading = ref(false);
 const toast = ref('');
 const homeStats = ref({ projects: 0, plays: 0, contributors: 0, price: 0 });
 const marketStats = ref({ projects: 0, weeklyActive: 0, downloads: '0', price: 0 });
@@ -79,11 +81,42 @@ function route() {
   activeView.value = routes.some((item) => item.key === key) ? key : 'notFound';
 }
 
-function openPlayer(game) {
+function resolveBackendUrl(path) {
+  if (!path) return '';
+  return new URL(path, import.meta.env.VITE_API_BASE_URL || window.location.origin).toString();
+}
+
+function showApiStatusToast(error, messages) {
+  const fallback = messages.default || error?.message || '操作失败，请稍后重试';
+  showToast(messages[error?.status] || fallback);
+}
+
+async function openPlayer(game) {
   if (!game) return;
-  currentGame.value = game;
-  playerOpen.value = true;
-  trackGamePlay(game.id).catch(() => {});
+
+  playerLoading.value = true;
+  try {
+    const result = await trackGamePlay(game.id);
+    const playUrl = result?.playUrl;
+    if (!playUrl) {
+      showToast('游戏尚未发布，暂时不能在线游玩');
+      return;
+    }
+    currentGame.value = { ...game, plays: result.plays ?? game.plays, playUrl };
+    currentPlayUrl.value = resolveBackendUrl(playUrl);
+    playerOpen.value = true;
+  } catch (error) {
+    showApiStatusToast(error, {
+      401: '请先登录后再试玩',
+      403: '没有权限试玩该游戏',
+      404: '游戏尚未发布或试玩入口不存在',
+      422: error?.message || '构建包格式不正确',
+      default: '试玩入口暂时不可用',
+    });
+    if (error?.status === 401) openAuth();
+  } finally {
+    playerLoading.value = false;
+  }
 }
 
 function showToast(message) {
@@ -169,8 +202,15 @@ async function submitUpload(payload) {
     await uploadGame(payload);
     uploadOpen.value = false;
     showToast('游戏已提交，等待审核');
-  } catch {
-    showToast('提交失败，请稍后重试');
+  } catch (error) {
+    showApiStatusToast(error, {
+      401: '请先登录后再发布游戏',
+      403: '没有权限发布游戏',
+      404: '上传接口不存在',
+      422: error?.message || '上传文件不符合要求',
+      default: error?.message || '提交失败，请稍后重试',
+    });
+    if (error?.status === 401) openAuth();
   } finally {
     uploadSubmitting.value = false;
   }
@@ -292,9 +332,20 @@ async function loadClientData() {
 async function downloadGameSource(game) {
   try {
     const result = await getGameSource(game.id);
-    showToast(`源码已准备：${result.size || game.size}`);
-  } catch {
-    showToast('源码暂时无法下载');
+    if (result.downloadUrl) {
+      window.open(resolveBackendUrl(result.downloadUrl), '_blank', 'noopener');
+      showToast(`源码已准备：${result.size || game.size}`);
+      return;
+    }
+    showToast('源码下载地址不存在');
+  } catch (error) {
+    showApiStatusToast(error, {
+      401: '请先登录后再下载源码',
+      403: '没有权限下载源码',
+      404: '源码尚未发布或不存在',
+      default: '源码暂时无法下载',
+    });
+    if (error?.status === 401) openAuth();
   }
 }
 
@@ -353,6 +404,7 @@ function onKeydown(event) {
     postModalOpen.value = false;
     accountMenuOpen.value = false;
     playerOpen.value = false;
+    currentPlayUrl.value = '';
     searchOpen.value = false;
   }
 }
@@ -561,7 +613,8 @@ watch(activeForumCat, async (cat) => {
       <div class="player-window">
         <div class="player-bar"><div class="dots"><span></span><span></span><span></span></div><div class="player-title">{{ currentGame.title }}</div><button class="player-close" @click="playerOpen = false">×</button></div>
         <div class="player-canvas">
-          <div class="player-demo">
+          <iframe v-if="currentPlayUrl" class="player-frame" :src="currentPlayUrl" :title="currentGame.title" allowfullscreen></iframe>
+          <div v-else class="player-demo">
             <div class="logo">{{ currentGame.glyph }}</div>
             <h2>{{ currentGame.title }}</h2>
             <p>WebGL 2.0 · 平均帧率 60 FPS · 体积 {{ currentGame.size }}</p>

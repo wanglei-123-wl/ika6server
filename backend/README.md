@@ -31,6 +31,7 @@ IKA6_MIGRATIONS_DIR=F:\ika6server\backend\migrations
 IKA6_BOOTSTRAP_ADMIN_ACCOUNT=admin@example.com
 IKA6_UPLOAD_DIR=F:\ika6server\storage\uploads
 IKA6_TEMP_DIR=F:\ika6server\storage\tmp
+IKA6_PLAY_DIR=F:\ika6server\storage\play
 IKA6_TOKEN_SECRET=change-me
 IKA6_CLAMSCAN_BIN=C:\Program Files\ClamAV\clamscan.exe
 IKA6_CLAMAV_DB_DIR=F:\ika6server\storage\clamav-db
@@ -62,6 +63,8 @@ The Compose file is only a local verification environment; it is not started by 
 The first version uses in-memory stores so the API shape can be tested before wiring PostgreSQL into repositories.
 
 Uploaded files are written to a temporary directory, scanned with ClamAV and optional YARA rules, then moved into the upload directory only when the scan is clean. Archive uploads are extracted with 7-Zip into a temporary scan directory and scanned recursively before approval.
+
+Online play builds are deployed from uploaded `.zip` build packages into `IKA6_PLAY_DIR`. The build package must contain an `index.html`; play assets are served from `/play/games/{gameId}/...` only after the game is published.
 
 Second-stage safety controls are included in the in-memory development backend:
 

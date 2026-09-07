@@ -5,11 +5,12 @@ const TOKEN_KEY = 'ika6_auth_token';
 export const AUTH_EXPIRED_EVENT = 'ika6:auth-expired';
 
 export class ApiError extends Error {
-  constructor(message, { status = 0, code = -1, data = null } = {}) {
+  constructor(message, { status = 0, code = -1, errorCode = '', data = null } = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.errorCode = errorCode;
     this.data = data;
   }
 }
@@ -62,8 +63,9 @@ function normalizePayload(payload) {
         notifyAuthExpired();
       }
 
-      throw new ApiError(payload.message || 'Request failed', {
+      throw new ApiError(payload.message || '请求失败，请稍后重试', {
         code: payload.code,
+        errorCode: payload.errorCode,
         data: payload.data,
       });
     }
@@ -73,8 +75,9 @@ function normalizePayload(payload) {
 
   if (payload && typeof payload === 'object' && 'success' in payload) {
     if (!payload.success) {
-      throw new ApiError(payload.message || 'Request failed', {
+      throw new ApiError(payload.message || '请求失败，请稍后重试', {
         code: payload.code,
+        errorCode: payload.errorCode,
         data: payload.data,
       });
     }
@@ -128,7 +131,7 @@ export async function request(path, options = {}) {
   try {
     payload = text ? JSON.parse(text) : null;
   } catch {
-    throw new ApiError('Server returned invalid JSON', { status: response.status });
+    throw new ApiError('服务器返回的数据格式不正确', { status: response.status });
   }
 
   if (!response.ok) {
@@ -136,9 +139,10 @@ export async function request(path, options = {}) {
       setAuthToken('');
       notifyAuthExpired();
     }
-    throw new ApiError(payload?.message || response.statusText || 'Request failed', {
+    throw new ApiError(payload?.message || '请求失败，请稍后重试', {
       status: response.status,
       code: payload?.code,
+      errorCode: payload?.errorCode,
       data: payload?.data,
     });
   }

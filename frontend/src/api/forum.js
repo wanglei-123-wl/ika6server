@@ -1,4 +1,4 @@
-import { request } from './http';
+import { ApiError, request } from './http';
 import {
   mockCreatePost,
   mockCreateReply,
@@ -51,22 +51,57 @@ export async function likeForumPost(id) {
 
 export async function likeForumReply(id) {
   return requestWithFallback(
-    () => request(`/api/forum/replies/${id}/like`, { method: 'POST' }),
+    async () => {
+      try {
+        return await request(`/api/forum/comments/${id}/like`, { method: 'POST' });
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) {
+          return request(`/api/forum/replies/${id}/like`, { method: 'POST' });
+        }
+        throw error;
+      }
+    },
     () => mockLikeReply(id),
   );
 }
 
 export async function getForumReplies(postId, params) {
   const result = await requestWithFallback(
-    () => request(`/api/forum/posts/${postId}/replies`, { params }),
+    async () => {
+      try {
+        return await request(`/api/forum/posts/${postId}/comments`, { params });
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) {
+          return request(`/api/forum/posts/${postId}/replies`, { params });
+        }
+        throw error;
+      }
+    },
     () => mockGetReplies(postId, params),
+  );
+  return normalizePage(result, normalizeReply);
+}
+
+export async function getForumCommentReplies(commentId, params) {
+  const result = await requestWithFallback(
+    () => request(`/api/forum/comments/${commentId}/replies`, { params }),
+    () => mockGetReplies(commentId, params),
   );
   return normalizePage(result, normalizeReply);
 }
 
 export async function createForumReply(postId, payload) {
   return normalizeReply(await requestWithFallback(
-    () => request(`/api/forum/posts/${postId}/replies`, { method: 'POST', body: payload }),
+    async () => {
+      try {
+        return await request(`/api/forum/posts/${postId}/comments`, { method: 'POST', body: payload });
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404 && !payload.parentId && !payload.replyToCommentId) {
+          return request(`/api/forum/posts/${postId}/replies`, { method: 'POST', body: payload });
+        }
+        throw error;
+      }
+    },
     () => mockCreateReply(postId, payload),
   ));
 }

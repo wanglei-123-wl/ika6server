@@ -69,6 +69,7 @@ function validate() {
   if (!form.buildFile) nextErrors.buildFile = '请上传可试玩的游戏构建包';
   if (form.coverFile && !form.coverFile.type.startsWith('image/')) nextErrors.coverFile = '封面必须是图片文件';
   if (form.coverFile && form.coverFile.size > maxCoverSize) nextErrors.coverFile = '封面不能超过 8 MB';
+  if (form.buildFile && !form.buildFile.name.toLowerCase().endsWith('.zip')) nextErrors.buildFile = '在线游玩构建包必须是 ZIP 文件';
   if (form.buildFile && form.buildFile.size > maxBuildSize) nextErrors.buildFile = '游戏构建包不能超过 500 MB';
   if (form.sourceFile && form.sourceFile.size > maxSourceSize) nextErrors.sourceFile = '源码包不能超过 300 MB';
 
@@ -110,7 +111,7 @@ function submit() {
           <span>1</span>
           <div>
             <strong>提交后进入审核队列</strong>
-            <p>现在先走前端 mock 流程，后端接通后会上传文件并返回审核状态。</p>
+            <p>构建包请上传 ZIP，压缩包内必须包含 index.html，审核通过后才可在线游玩。</p>
           </div>
         </div>
 
@@ -181,10 +182,10 @@ function submit() {
           </label>
 
           <label class="drop-zone upload-drop" :class="{ invalid: errors.buildFile }">
-            <input type="file" accept=".zip,.rar,.7z,.tar,.gz,.html" @change="setFile('buildFile', $event)" />
+            <input type="file" accept=".zip" @change="setFile('buildFile', $event)" />
             <div class="ico">包</div>
             <div class="t">{{ form.buildFile ? form.buildFile.name : '上传试玩构建包' }}</div>
-            <div class="s">{{ form.buildFile ? readableSize(form.buildFile) : 'ZIP / HTML5 构建 · 最大 500 MB' }}</div>
+            <div class="s">{{ form.buildFile ? readableSize(form.buildFile) : 'ZIP 构建包 · 内含 index.html · 最大 500 MB' }}</div>
             <span v-if="errors.buildFile" class="auth-error">{{ errors.buildFile }}</span>
           </label>
 

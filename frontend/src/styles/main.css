@@ -1334,6 +1334,15 @@ button {
   gap: 10px;
 }
 
+.comment-item {
+  align-items: flex-start;
+}
+
+.r-body {
+  min-width: 0;
+  flex: 1;
+}
+
 .reply-items {
   display: grid;
   gap: 12px;
@@ -1399,10 +1408,17 @@ button {
 .r-text {
   color: var(--text-2);
   font-size: 13px;
+  line-height: 1.65;
+}
+
+.comment-actions {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  margin-top: 6px;
 }
 
 .reply-like-btn {
-  margin-top: 6px;
   padding: 0;
   background: transparent;
   color: var(--text-3);
@@ -1419,6 +1435,72 @@ button {
 
 .reply-like-btn:disabled {
   cursor: default;
+}
+
+.comment-reply-btn {
+  padding: 0;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.comment-reply-btn:hover {
+  color: var(--accent);
+}
+
+.comment-more-btn {
+  width: fit-content;
+  margin-top: 10px;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.comment-more-btn:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.comment-children {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-1) 58%, transparent);
+}
+
+.comment-child {
+  gap: 8px;
+}
+
+.child-ava {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+
+.reply-to {
+  color: var(--accent);
+}
+
+.compose-target {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.compose-target button {
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
 }
 
 .more-floors {
@@ -2275,6 +2357,14 @@ button {
     linear-gradient(90deg, rgba(6, 182, 212, 0.12) 1px, transparent 1px),
     var(--bg-0);
   background-size: 42px 42px;
+}
+
+.player-frame {
+  width: 100%;
+  height: min(72vh, 640px);
+  min-height: 520px;
+  border: 0;
+  background: #050816;
 }
 
 .player-demo {

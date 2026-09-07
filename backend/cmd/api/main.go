@@ -25,6 +25,7 @@ import (
 	"github.com/wanglei-123-wl/ika6server/backend/internal/config"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/database"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/files"
+	playdeploy "github.com/wanglei-123-wl/ika6server/backend/internal/play"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/posts"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/reputation"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/sandbox"
@@ -40,6 +41,7 @@ type app struct {
 	auth       *auth.Service
 	posts      *posts.Store
 	files      *files.Store
+	play       *playdeploy.Service
 	audit      *audit.Service
 	auditLog   audit.Logger
 	blocklist  blocklist.Repository
@@ -50,6 +52,18 @@ type app struct {
 }
 
 type response map[string]any
+
+const (
+	errorCodeInvalidCredentials = "INVALID_CREDENTIALS"
+	errorCodeEmailExists        = "EMAIL_EXISTS"
+	errorCodeInvalidToken       = "INVALID_TOKEN"
+	errorCodeForbidden          = "FORBIDDEN"
+	errorCodeValidation         = "VALIDATION_ERROR"
+	errorCodeNotFound           = "NOT_FOUND"
+	errorCodeConflict           = "CONFLICT"
+	errorCodeNotImplemented     = "NOT_IMPLEMENTED"
+	errorCodeInternal           = "INTERNAL_ERROR"
+)
 
 func main() {
 	cfg := config.Load()
@@ -130,6 +144,7 @@ func main() {
 			YaraBin:     cfg.YaraBin,
 			YaraRules:   cfg.YaraRules,
 		}), sandbox.NewAnalyzer(), blocklistRepository),
+		play:       playdeploy.NewService(cfg.PlayDir),
 		audit:      audit.NewService(postStore),
 		auditLog:   auditLogger,
 		blocklist:  blocklistRepository,
@@ -168,11 +183,16 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/games/{id}/play", a.handlePlayGame)
 	mux.HandleFunc("GET /api/games/{id}/download-source", a.handleGameSource)
 	mux.HandleFunc("GET /api/games/{id}/files/{kind}", a.handleGameFile)
+	mux.HandleFunc("GET /play/games/{id}/{path...}", a.handlePlayAsset)
 	mux.HandleFunc("GET /api/forum/bars", a.handleForumBars)
 	mux.HandleFunc("GET /api/forum/posts", a.handleForumPosts)
 	mux.HandleFunc("GET /api/forum/posts/{id}", a.handleForumPost)
 	mux.HandleFunc("POST /api/forum/posts", a.handleCreateForumPost)
 	mux.HandleFunc("POST /api/forum/posts/{id}/like", a.handleLikeForumPost)
+	mux.HandleFunc("GET /api/forum/posts/{postId}/comments", a.handleComments)
+	mux.HandleFunc("GET /api/forum/comments/{commentId}/replies", a.handleCommentReplies)
+	mux.HandleFunc("POST /api/forum/posts/{postId}/comments", a.handleCreateComment)
+	mux.HandleFunc("POST /api/forum/comments/{commentId}/like", a.handleLikeComment)
 	mux.HandleFunc("GET /api/forum/posts/{id}/replies", a.handleReplies)
 	mux.HandleFunc("POST /api/forum/posts/{id}/replies", a.handleCreateReply)
 	mux.HandleFunc("POST /api/forum/replies/{id}/like", a.handleLikeReply)
@@ -236,7 +256,15 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	user, token, err := a.auth.Register(username, email, input.Password)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if strings.Contains(strings.ToLower(err.Error()), "email already exists") {
+			writeErrorCode(w, http.StatusConflict, errorCodeEmailExists, "邮箱已注册")
+			return
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "password must") {
+			writeErrorCode(w, http.StatusBadRequest, errorCodeValidation, "密码长度不符合要求")
+			return
+		}
+		writeErrorCode(w, http.StatusBadRequest, errorCodeValidation, err.Error())
 		return
 	}
 
@@ -274,7 +302,7 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	user, token, err := a.auth.LoginWithRemember(email, input.Password, input.Remember)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, err.Error())
+		writeErrorCode(w, http.StatusUnauthorized, errorCodeInvalidCredentials, "账号或密码错误")
 		return
 	}
 
@@ -293,7 +321,7 @@ func (a *app) handleMe(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
 	token, ok := bearerToken(r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "bearer token required")
+		writeErrorCode(w, http.StatusUnauthorized, errorCodeInvalidToken, "登录凭证无效或缺失")
 		return
 	}
 	if _, ok := a.currentUser(w, r); !ok {
@@ -328,14 +356,14 @@ func (a *app) handleSocialLogin(w http.ResponseWriter, r *http.Request) {
 		username = strings.TrimSpace(input.Name)
 	}
 	if provider == "" || email == "" {
-		writeError(w, http.StatusBadRequest, "provider and account are required")
+		writeErrorCode(w, http.StatusBadRequest, errorCodeValidation, "登录方式和账号不能为空")
 		return
 	}
 	if username == "" {
 		username = strings.TrimSpace(strings.Split(email, "@")[0])
 	}
 	if username == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
+		writeErrorCode(w, http.StatusBadRequest, errorCodeValidation, "用户名不能为空")
 		return
 	}
 
@@ -343,7 +371,7 @@ func (a *app) handleSocialLogin(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		hash, err := auth.HashPassword(randomLocalPassword())
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to create social account")
+			writeErrorCode(w, http.StatusInternalServerError, errorCodeInternal, "创建账号失败")
 			return
 		}
 		user, err = a.users.Create(username, email, hash)
@@ -351,7 +379,7 @@ func (a *app) handleSocialLogin(w http.ResponseWriter, r *http.Request) {
 			var exists bool
 			user, exists = a.users.FindByEmail(email)
 			if !exists {
-				writeError(w, http.StatusBadRequest, err.Error())
+				writeErrorCode(w, http.StatusBadRequest, errorCodeValidation, err.Error())
 				return
 			}
 		}
@@ -506,15 +534,27 @@ func (a *app) handleCreateGame(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnprocessableEntity, field.formName+": "+saveErr.Error())
 			return
 		}
+		downloadURL := "/api/games/" + strconv.FormatInt(item.ID, 10) + "/files/" + field.kind
 		if a.sqlCatalog != nil {
 			if recordErr := a.sqlCatalog.RecordGameFile(r.Context(), item.ID, catalog.GameFile{
 				GameID: item.ID, Kind: field.kind, OriginalName: stored.OriginalName,
 				StoredName: stored.StoredName, Size: stored.Size, SHA256: stored.SHA256,
-				DownloadURL: "/api/games/" + strconv.FormatInt(item.ID, 10) + "/files/" + field.kind,
+				DownloadURL: downloadURL,
 				Status:      item.Status,
 			}); recordErr != nil {
 				a.removeCreatedGame(item.ID)
 				writeError(w, http.StatusInternalServerError, "failed to record uploaded file")
+				return
+			}
+		} else if err := a.catalog.SetGameFileURL(item.ID, field.kind, downloadURL); err != nil {
+			a.removeCreatedGame(item.ID)
+			writeError(w, http.StatusInternalServerError, "failed to record uploaded file")
+			return
+		}
+		if field.kind == "build" {
+			if deployErr := a.deployGameBuild(r.Context(), item.ID, stored.StoredName); deployErr != nil {
+				a.removeCreatedGame(item.ID)
+				writeError(w, http.StatusUnprocessableEntity, "buildFile: "+deployErr.Error())
 				return
 			}
 		}
@@ -527,6 +567,9 @@ func (a *app) removeCreatedGame(id int64) {
 	if a.files != nil {
 		a.files.RemoveOwner(id)
 	}
+	if a.play != nil {
+		_ = a.play.Remove(id)
+	}
 	if a.sqlCatalog != nil {
 		_ = a.sqlCatalog.DeleteGame(context.Background(), id)
 		return
@@ -534,6 +577,31 @@ func (a *app) removeCreatedGame(id int64) {
 	if a.catalog != nil {
 		a.catalog.RemoveGame(id)
 	}
+}
+
+func (a *app) deployGameBuild(ctx context.Context, gameID int64, storedName string) error {
+	if a.play == nil {
+		return errors.New("online play deployment is not configured")
+	}
+	deployment, err := a.play.DeployZip(ctx, gameID, filepath.Join(a.config.UploadDir, storedName))
+	if err != nil {
+		return err
+	}
+	if a.sqlCatalog != nil {
+		file, err := a.sqlCatalog.GameFile(ctx, gameID, "build")
+		if err != nil {
+			return err
+		}
+		return a.sqlCatalog.RecordPlayDeployment(ctx, catalog.PlayDeployment{
+			GameID:    gameID,
+			FileID:    file.ID,
+			RootPath:  deployment.RootPath,
+			EntryPath: deployment.EntryPath,
+			PublicURL: deployment.PublicURL,
+			Status:    "reviewing",
+		})
+	}
+	return a.catalog.SetGamePlayURL(gameID, deployment.PublicURL)
 }
 
 func (a *app) handleGame(w http.ResponseWriter, r *http.Request) {
@@ -584,20 +652,7 @@ func (a *app) handleGameSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item, exists := a.catalog.Game(id)
-	if a.sqlCatalog != nil {
-		var err error
-		item, err = a.sqlCatalog.Game(r.Context(), id)
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "source not found")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load source")
-			return
-		}
-		exists = true
-	}
-	if !exists || !item.HasSource {
+	if !exists || item.Status != "published" || !item.HasSource {
 		writeError(w, http.StatusNotFound, "source not found")
 		return
 	}
@@ -620,7 +675,15 @@ func (a *app) handleGameFile(w http.ResponseWriter, r *http.Request) {
 		exists bool
 	)
 	if a.sqlCatalog != nil {
-		record, err := a.sqlCatalog.GameFile(r.Context(), id, kind)
+		var (
+			record catalog.GameFile
+			err    error
+		)
+		if kind == "cover" {
+			record, err = a.sqlCatalog.GameFile(r.Context(), id, kind)
+		} else {
+			record, err = a.sqlCatalog.PublishedGameFile(r.Context(), id, kind)
+		}
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "file not found")
 			return
@@ -638,6 +701,12 @@ func (a *app) handleGameFile(w http.ResponseWriter, r *http.Request) {
 		exists = err == nil
 	} else {
 		file, path, exists = a.files.FindByKey(id, kind)
+		if kind != "cover" {
+			item, ok := a.catalog.Game(id)
+			if !ok || item.Status != "published" {
+				exists = false
+			}
+		}
 	}
 	if !exists {
 		writeError(w, http.StatusNotFound, "file not found")
@@ -655,6 +724,52 @@ func (a *app) handleGameFile(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeHeader(file.OriginalName)+`"`)
 	http.ServeFile(w, r, path)
+}
+
+func (a *app) handlePlayAsset(w http.ResponseWriter, r *http.Request) {
+	id, ok := routeID(w, r, "games")
+	if !ok {
+		return
+	}
+	if a.play == nil {
+		writeError(w, http.StatusNotFound, "play deployment not found")
+		return
+	}
+	if a.sqlCatalog != nil {
+		if _, err := a.sqlCatalog.ReadyPlayDeployment(r.Context(), id); err != nil {
+			writeError(w, http.StatusNotFound, "play deployment not found")
+			return
+		}
+	} else {
+		item, exists := a.catalog.Game(id)
+		if !exists || item.Status != "published" || strings.TrimSpace(item.PlayURL) == "" {
+			writeError(w, http.StatusNotFound, "play deployment not found")
+			return
+		}
+	}
+	path, err := a.play.Resolve(id, r.PathValue("path"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid play asset path")
+		return
+	}
+	if _, err := os.Stat(path); err != nil {
+		writeError(w, http.StatusNotFound, "play asset not found")
+		return
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "play asset not found")
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, "play asset not found")
+		return
+	}
+	w.Header().Set("Content-Security-Policy", "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' data: blob:")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 }
 
 func (a *app) handleLikeGame(w http.ResponseWriter, r *http.Request) {
@@ -688,13 +803,38 @@ func (a *app) handlePlayGame(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := a.catalog.PlayGame(id)
 	if a.sqlCatalog != nil {
+		deployment, err := a.sqlCatalog.ReadyPlayDeployment(r.Context(), id)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "play deployment not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load play deployment")
+			return
+		}
 		err = a.sqlCatalog.PlayGame(r.Context(), id)
 		if err == nil {
-			item, err = a.sqlCatalog.Game(r.Context(), id)
+			item, loadErr := a.sqlCatalog.Game(r.Context(), id)
+			if loadErr != nil {
+				err = loadErr
+			} else {
+				item.PlayURL = deployment.PublicURL
+				writeAPI(w, http.StatusOK, map[string]any{"id": item.ID, "plays": item.Plays, "playUrl": item.PlayURL})
+				return
+			}
 		}
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+		}
+		return
 	}
+	item, exists := a.catalog.Game(id)
+	if !exists || item.Status != "published" || strings.TrimSpace(item.PlayURL) == "" {
+		writeError(w, http.StatusNotFound, "play deployment not found")
+		return
+	}
+	item, err := a.catalog.PlayGame(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
@@ -814,11 +954,19 @@ func (a *app) handleLikeForumPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleLikeReply(w http.ResponseWriter, r *http.Request) {
+	a.likeCommentByPathValue(w, r, "id")
+}
+
+func (a *app) handleLikeComment(w http.ResponseWriter, r *http.Request) {
+	a.likeCommentByPathValue(w, r, "commentId")
+}
+
+func (a *app) likeCommentByPathValue(w http.ResponseWriter, r *http.Request, pathValue string) {
 	user, ok := a.currentUser(w, r)
 	if !ok {
 		return
 	}
-	id, ok := routeID(w, r, "replies")
+	id, ok := routePathID(w, r, pathValue)
 	if !ok {
 		return
 	}
@@ -843,18 +991,30 @@ func (a *app) handleLikeReply(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, http.StatusOK, map[string]any{"liked": true, "likes": reply.Likes, "changed": changed})
 }
 
+func (a *app) handleComments(w http.ResponseWriter, r *http.Request) {
+	postID, ok := routePathID(w, r, "postId")
+	if !ok {
+		return
+	}
+	a.writeComments(w, r, postID)
+}
+
 func (a *app) handleReplies(w http.ResponseWriter, r *http.Request) {
 	id, ok := routeID(w, r, "posts")
 	if !ok {
 		return
 	}
+	a.writeComments(w, r, id)
+}
+
+func (a *app) writeComments(w http.ResponseWriter, r *http.Request, postID int64) {
 	user, authenticated, ok := a.optionalCurrentUser(w, r)
 	if !ok {
 		return
 	}
-	items, exists := a.catalog.Replies(id)
+	items, exists := a.catalog.Comments(postID)
 	if authenticated {
-		items, exists = a.catalog.RepliesForUser(id, user.ID)
+		items, exists = a.catalog.CommentsForUser(postID, user.ID)
 	}
 	if a.sqlCatalog != nil {
 		var (
@@ -862,9 +1022,9 @@ func (a *app) handleReplies(w http.ResponseWriter, r *http.Request) {
 			err      error
 		)
 		if authenticated {
-			sqlItems, err = a.sqlCatalog.RepliesForUser(r.Context(), id, user.ID)
+			sqlItems, err = a.sqlCatalog.CommentsForUser(r.Context(), postID, user.ID)
 		} else {
-			sqlItems, err = a.sqlCatalog.Replies(r.Context(), id)
+			sqlItems, err = a.sqlCatalog.Comments(r.Context(), postID)
 		}
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "post not found")
@@ -879,6 +1039,47 @@ func (a *app) handleReplies(w http.ResponseWriter, r *http.Request) {
 	}
 	if !exists {
 		writeError(w, http.StatusNotFound, "post not found")
+		return
+	}
+	writeAPI(w, http.StatusOK, paginate(items, r))
+}
+
+func (a *app) handleCommentReplies(w http.ResponseWriter, r *http.Request) {
+	parentID, ok := routePathID(w, r, "commentId")
+	if !ok {
+		return
+	}
+	user, authenticated, ok := a.optionalCurrentUser(w, r)
+	if !ok {
+		return
+	}
+	items, exists := a.catalog.CommentReplies(parentID)
+	if authenticated {
+		items, exists = a.catalog.CommentRepliesForUser(parentID, user.ID)
+	}
+	if a.sqlCatalog != nil {
+		var (
+			sqlItems []catalog.Reply
+			err      error
+		)
+		if authenticated {
+			sqlItems, err = a.sqlCatalog.CommentRepliesForUser(r.Context(), parentID, user.ID)
+		} else {
+			sqlItems, err = a.sqlCatalog.CommentReplies(r.Context(), parentID)
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "comment not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load comment replies")
+			return
+		}
+		writeAPI(w, http.StatusOK, paginate(sqlItems, r))
+		return
+	}
+	if !exists {
+		writeError(w, http.StatusNotFound, "comment not found")
 		return
 	}
 	writeAPI(w, http.StatusOK, paginate(items, r))
@@ -909,6 +1110,39 @@ func (a *app) handleCreateReply(w http.ResponseWriter, r *http.Request) {
 			} else {
 				err = listErr
 			}
+		}
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeAPI(w, http.StatusCreated, item)
+}
+
+func (a *app) handleCreateComment(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	postID, ok := routePathID(w, r, "postId")
+	if !ok {
+		return
+	}
+	var input struct {
+		Content          string `json:"content"`
+		ParentID         *int64 `json:"parentId"`
+		ReplyToCommentID *int64 `json:"replyToCommentId"`
+		ReplyToAuthor    string `json:"replyToAuthor"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	item, err := a.catalog.AddComment(user.Username, input.Content, postID, input.ParentID, input.ReplyToCommentID)
+	if a.sqlCatalog != nil {
+		id, createErr := a.sqlCatalog.AddComment(r.Context(), postID, user.ID, input.Content, input.ParentID, input.ReplyToCommentID)
+		err = createErr
+		if err == nil {
+			item, err = a.sqlCatalog.Reply(r.Context(), id)
 		}
 	}
 	if err != nil {
@@ -1459,7 +1693,42 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, response{"code": status, "message": message, "data": nil, "success": false, "error": message})
+	writeErrorCode(w, status, errorCodeFor(status, message), message)
+}
+
+func writeErrorCode(w http.ResponseWriter, status int, errorCode, message string) {
+	writeJSON(w, status, response{
+		"code":      status,
+		"errorCode": errorCode,
+		"message":   message,
+		"data":      nil,
+		"success":   false,
+		"error":     message,
+	})
+}
+
+func errorCodeFor(status int, message string) string {
+	lowerMessage := strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case strings.Contains(lowerMessage, "email already exists"):
+		return errorCodeEmailExists
+	case strings.Contains(lowerMessage, "invalid email or password"):
+		return errorCodeInvalidCredentials
+	case status == http.StatusUnauthorized:
+		return errorCodeInvalidToken
+	case status == http.StatusForbidden:
+		return errorCodeForbidden
+	case status == http.StatusNotFound:
+		return errorCodeNotFound
+	case status == http.StatusConflict:
+		return errorCodeConflict
+	case status == http.StatusNotImplemented:
+		return errorCodeNotImplemented
+	case status >= http.StatusInternalServerError:
+		return errorCodeInternal
+	default:
+		return errorCodeValidation
+	}
 }
 
 func writeAPI(w http.ResponseWriter, status int, data any) {
@@ -1510,7 +1779,11 @@ func positiveInt(value string, fallback int) int {
 
 func routeID(w http.ResponseWriter, r *http.Request, resource string) (int64, bool) {
 	_ = resource
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	return routePathID(w, r, "id")
+}
+
+func routePathID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue(name), 10, 64)
 	if err != nil || id <= 0 {
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return 0, false

@@ -79,15 +79,20 @@ type Repo struct {
 }
 
 type Reply struct {
-	ID         int64  `json:"id"`
-	PostID     int64  `json:"postId"`
-	Author     string `json:"author"`
-	AvatarText string `json:"avatarText"`
-	Floor      int    `json:"floor"`
-	Content    string `json:"content"`
-	CreatedAt  string `json:"createdAt"`
-	Likes      int64  `json:"likes"`
-	Liked      bool   `json:"liked"`
+	ID               int64   `json:"id"`
+	PostID           int64   `json:"postId"`
+	ParentID         *int64  `json:"parentId"`
+	ReplyToCommentID *int64  `json:"replyToCommentId"`
+	ReplyToAuthor    string  `json:"replyToAuthor"`
+	Author           string  `json:"author"`
+	AvatarText       string  `json:"avatarText"`
+	Floor            int     `json:"floor"`
+	Content          string  `json:"content"`
+	CreatedAt        string  `json:"createdAt"`
+	Likes            int64   `json:"likes"`
+	Liked            bool    `json:"liked"`
+	ReplyCount       int64   `json:"replyCount"`
+	Replies          []Reply `json:"replies"`
 }
 
 type Store struct {
@@ -293,6 +298,30 @@ func (s *Store) PlayGame(id int64) (Game, error) {
 	return Game{}, errors.New("game not found")
 }
 
+func (s *Store) SetGamePlayURL(id int64, playURL string) error {
+	return s.SetGameFileURL(id, "build", playURL)
+}
+
+func (s *Store) SetGameFileURL(id int64, kind, fileURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.games {
+		if s.games[index].ID == id {
+			switch strings.ToLower(strings.TrimSpace(kind)) {
+			case "cover":
+				s.games[index].CoverURL = strings.TrimSpace(fileURL)
+			case "build":
+				s.games[index].PlayURL = strings.TrimSpace(fileURL)
+			case "source":
+				s.games[index].SourceURL = strings.TrimSpace(fileURL)
+				s.games[index].HasSource = strings.TrimSpace(fileURL) != ""
+			}
+			return nil
+		}
+	}
+	return errors.New("game not found")
+}
+
 func (s *Store) AddPost(author, title, cat, content string, tags []string, barID int64) (ForumPost, error) {
 	title, content = strings.TrimSpace(title), strings.TrimSpace(content)
 	if author == "" || title == "" || content == "" || barID <= 0 {
@@ -399,23 +428,60 @@ func (s *Store) LikeReply(replyID, userID int64) (Reply, bool, error) {
 }
 
 func (s *Store) AddReply(author, content string, postID int64) (Reply, error) {
+	return s.AddComment(author, content, postID, nil, nil)
+}
+
+func (s *Store) AddComment(author, content string, postID int64, parentID, replyToCommentID *int64) (Reply, error) {
 	content = strings.TrimSpace(content)
 	if author == "" || content == "" || postID <= 0 {
 		return Reply{}, errors.New("author, content and postId are required")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	postIndex := -1
 	for index := range s.posts {
-		if s.posts[index].ID != postID {
-			continue
+		if s.posts[index].ID == postID {
+			postIndex = index
+			break
 		}
-		reply := Reply{ID: s.nextReplyID, PostID: postID, Author: author, AvatarText: strings.ToUpper(string([]rune(author)[0])), Floor: len(s.replies[postID]) + 2, Content: content, CreatedAt: "刚刚"}
-		s.nextReplyID++
-		s.replies[postID] = append(s.replies[postID], reply)
-		s.posts[index].Replies = strconv.Itoa(len(s.replies[postID]))
-		return reply, nil
 	}
-	return Reply{}, errors.New("post not found")
+	if postIndex < 0 {
+		return Reply{}, errors.New("post not found")
+	}
+	var replyToAuthor string
+	if parentID != nil {
+		parent, ok := s.replyByIDLocked(*parentID)
+		if !ok || parent.PostID != postID || parent.ParentID != nil {
+			return Reply{}, errors.New("parent comment not found")
+		}
+		targetID := *parentID
+		if replyToCommentID != nil {
+			targetID = *replyToCommentID
+		}
+		target, ok := s.replyByIDLocked(targetID)
+		if !ok || target.PostID != postID || (target.ID != *parentID && (target.ParentID == nil || *target.ParentID != *parentID)) {
+			return Reply{}, errors.New("reply target not found")
+		}
+		replyToCommentID = &targetID
+		replyToAuthor = target.Author
+	}
+	reply := Reply{
+		ID:               s.nextReplyID,
+		PostID:           postID,
+		ParentID:         cloneInt64(parentID),
+		ReplyToCommentID: cloneInt64(replyToCommentID),
+		ReplyToAuthor:    replyToAuthor,
+		Author:           author,
+		AvatarText:       strings.ToUpper(string([]rune(author)[0])),
+		Floor:            len(s.replies[postID]) + 2,
+		Content:          content,
+		CreatedAt:        "刚刚",
+		Replies:          []Reply{},
+	}
+	s.nextReplyID++
+	s.replies[postID] = append(s.replies[postID], reply)
+	s.posts[postIndex].Replies = strconv.Itoa(len(s.replies[postID]))
+	return reply, nil
 }
 
 func (s *Store) Replies(postID int64) ([]Reply, bool) {
@@ -431,7 +497,7 @@ func (s *Store) Replies(postID int64) ([]Reply, bool) {
 	if !found {
 		return nil, false
 	}
-	return append([]Reply(nil), s.replies[postID]...), true
+	return s.commentsLocked(postID, nil, 0), true
 }
 
 func (s *Store) RepliesForUser(postID, userID int64) ([]Reply, bool) {
@@ -445,6 +511,91 @@ func (s *Store) RepliesForUser(postID, userID int64) ([]Reply, bool) {
 		items[index].Liked = s.replyLikes[items[index].ID][userID]
 	}
 	return items, true
+}
+
+func (s *Store) Comments(postID int64) ([]Reply, bool) {
+	return s.Replies(postID)
+}
+
+func (s *Store) CommentsForUser(postID, userID int64) ([]Reply, bool) {
+	return s.RepliesForUser(postID, userID)
+}
+
+func (s *Store) CommentReplies(parentID int64) ([]Reply, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	parent, ok := s.replyByIDLocked(parentID)
+	if !ok || parent.ParentID != nil {
+		return nil, false
+	}
+	return s.commentsLocked(parent.PostID, &parentID, 0), true
+}
+
+func (s *Store) CommentRepliesForUser(parentID, userID int64) ([]Reply, bool) {
+	items, ok := s.CommentReplies(parentID)
+	if !ok || userID <= 0 {
+		return items, ok
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for index := range items {
+		items[index].Liked = s.replyLikes[items[index].ID][userID]
+	}
+	return items, true
+}
+
+func (s *Store) replyByIDLocked(id int64) (Reply, bool) {
+	for _, replies := range s.replies {
+		for _, reply := range replies {
+			if reply.ID == id {
+				return reply, true
+			}
+		}
+	}
+	return Reply{}, false
+}
+
+func (s *Store) commentsLocked(postID int64, parentID *int64, userID int64) []Reply {
+	items := make([]Reply, 0)
+	for _, item := range s.replies[postID] {
+		if !sameOptionalInt64(item.ParentID, parentID) {
+			continue
+		}
+		item.ReplyCount = s.replyCountLocked(item.ID)
+		item.Replies = []Reply{}
+		if userID > 0 {
+			item.Liked = s.replyLikes[item.ID][userID]
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func (s *Store) replyCountLocked(parentID int64) int64 {
+	var count int64
+	for _, replies := range s.replies {
+		for _, item := range replies {
+			if item.ParentID != nil && *item.ParentID == parentID {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func sameOptionalInt64(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
 }
 
 func incrementCount(value string) string {
