@@ -249,7 +249,7 @@ function handleAuthExpired() {
 }
 
 function handleApiFallback() {
-  showToast('后端暂时不可用，已切换到备用模式');
+  showToast('后端服务不可用，请检查接口配置');
 }
 
 function accountAction(label) {

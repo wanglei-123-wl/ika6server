@@ -68,72 +68,59 @@ const (
 
 func main() {
 	cfg := config.Load()
+	if strings.TrimSpace(cfg.DatabaseURL) == "" {
+		log.Fatal("IKA6_DATABASE_URL is required; backend will not start without PostgreSQL persistence")
+	}
+
 	db, err := database.Open(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	userStore := users.NewStoreWithAdmin(cfg.BootstrapAdminAccount)
-	var userRepository users.Repository = userStore
 	var sqlCatalog *catalog.SQLRepository
 	var tokenRevocations auth.TokenRevocationStore
 	var blocklistRepository blocklist.Repository
 	var reputationRepository reputation.Repository
 	var auditLogger audit.Logger
-	if cfg.DatabaseURL != "" {
-		pingContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := db.Ping(pingContext)
-		cancel()
-		if err != nil {
-			log.Fatal(err)
-		}
-		migrations, err := database.LoadMigrations(cfg.MigrationsDir)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if err := database.ApplyMigrations(context.Background(), db.SQL(), migrations); err != nil {
-			log.Fatal(err)
-		}
-		userRepository, err = users.NewSQLRepository(db.SQL(), cfg.BootstrapAdminAccount)
-		if err != nil {
-			log.Fatal(err)
-		}
-		sqlCatalog, err = catalog.NewSQLRepository(db.SQL())
-		if err != nil {
-			log.Fatal(err)
-		}
-		tokenRevocations, err = auth.NewSQLRevocationStore(db.SQL())
-		if err != nil {
-			log.Fatal(err)
-		}
-		blocklistRepository, err = blocklist.NewSQLRepository(db.SQL())
-		if err != nil {
-			log.Fatal(err)
-		}
-		reputationRepository, err = reputation.NewSQLRepository(db.SQL())
-		if err != nil {
-			log.Fatal(err)
-		}
-		auditLogger, err = audit.NewSQLLogger(db.SQL())
-		if err != nil {
-			log.Fatal(err)
-		}
-	} else {
-		log.Printf("ika6 backend persistence mode: memory; set IKA6_DATABASE_URL to enable PostgreSQL persistence")
+	pingContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err = db.Ping(pingContext)
+	cancel()
+	if err != nil {
+		log.Fatal(err)
+	}
+	migrations, err := database.LoadMigrations(cfg.MigrationsDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := database.ApplyMigrations(context.Background(), db.SQL(), migrations); err != nil {
+		log.Fatal(err)
+	}
+	userRepository, err := users.NewSQLRepository(db.SQL(), cfg.BootstrapAdminAccount)
+	if err != nil {
+		log.Fatal(err)
+	}
+	sqlCatalog, err = catalog.NewSQLRepository(db.SQL())
+	if err != nil {
+		log.Fatal(err)
+	}
+	tokenRevocations, err = auth.NewSQLRevocationStore(db.SQL())
+	if err != nil {
+		log.Fatal(err)
+	}
+	blocklistRepository, err = blocklist.NewSQLRepository(db.SQL())
+	if err != nil {
+		log.Fatal(err)
+	}
+	reputationRepository, err = reputation.NewSQLRepository(db.SQL())
+	if err != nil {
+		log.Fatal(err)
+	}
+	auditLogger, err = audit.NewSQLLogger(db.SQL())
+	if err != nil {
+		log.Fatal(err)
 	}
 	postStore := posts.NewStore()
 	catalogStore := catalog.NewStore()
-	blocklistStore := blocklist.NewStore()
-	reputationStore := reputation.NewStore()
-	if blocklistRepository == nil {
-		blocklistRepository = blocklistStore
-	}
-	if reputationRepository == nil {
-		reputationRepository = reputationStore
-	}
-	if auditLogger == nil {
-		auditLogger = audit.NewMemoryLogger()
-	}
 	application := &app{
 		config:   cfg,
 		database: db,
