@@ -32,6 +32,43 @@ type Game struct {
 	CreatedAt string `json:"createdAt"`
 }
 
+type DeveloperGame struct {
+	ID             int64  `json:"id"`
+	Title          string `json:"title"`
+	Glyph          string `json:"glyph"`
+	Cover          int    `json:"cover"`
+	CoverURL       string `json:"coverUrl"`
+	Status         string `json:"status"`
+	Genre          string `json:"genre"`
+	Engine         string `json:"engine"`
+	Version        string `json:"version"`
+	Plays          int64  `json:"plays"`
+	Downloads      int64  `json:"downloads"`
+	Likes          int64  `json:"likes"`
+	ReviewProgress int    `json:"reviewProgress"`
+	ReviewMessage  string `json:"reviewMessage"`
+	RejectReason   string `json:"rejectReason"`
+	CreatedAt      string `json:"createdAt"`
+	UpdatedAt      string `json:"updatedAt"`
+	PlayURL        string `json:"playUrl"`
+	SourceURL      string `json:"sourceUrl"`
+}
+
+type DeveloperStats struct {
+	Following          int64  `json:"following"`
+	Followers          int64  `json:"followers"`
+	TotalLikes         int64  `json:"totalLikes"`
+	Works              int64  `json:"works"`
+	TotalPlays         int64  `json:"totalPlays"`
+	TotalDownloads     int64  `json:"totalDownloads"`
+	SponsorIncome      int64  `json:"sponsorIncome"`
+	WeeklyNewFollowers int64  `json:"weeklyNewFollowers"`
+	PlayTrend          string `json:"playTrend"`
+	DownloadTrend      string `json:"downloadTrend"`
+	LikeTrend          string `json:"likeTrend"`
+	IncomeTrend        string `json:"incomeTrend"`
+}
+
 type Bar struct {
 	ID      int64  `json:"id"`
 	Icon    string `json:"icon"`
@@ -204,6 +241,77 @@ func (s *Store) RemoveGame(id int64) {
 			return
 		}
 	}
+}
+
+func (s *Store) DeveloperGames(username, status string) []DeveloperGame {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	author := "@" + strings.TrimSpace(username)
+	status = strings.ToLower(strings.TrimSpace(status))
+	items := make([]DeveloperGame, 0)
+	for _, item := range s.games {
+		if item.Author != author {
+			continue
+		}
+		if status != "" && status != "all" && item.Status != status {
+			continue
+		}
+		items = append(items, developerGameFromGame(item, 0))
+	}
+	return items
+}
+
+func (s *Store) DeveloperStats(username string) DeveloperStats {
+	games := s.DeveloperGames(username, "all")
+	var stats DeveloperStats
+	for _, item := range games {
+		stats.Works++
+		stats.TotalLikes += item.Likes
+		stats.TotalPlays += item.Plays
+		stats.TotalDownloads += item.Downloads
+	}
+	return stats
+}
+
+func (s *Store) ResubmitDeveloperGame(username string, id int64) (DeveloperGame, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	author := "@" + strings.TrimSpace(username)
+	for index := range s.games {
+		if s.games[index].ID != id {
+			continue
+		}
+		if s.games[index].Author != author {
+			return DeveloperGame{}, errNotGameOwner
+		}
+		if s.games[index].Status != "rejected" {
+			return DeveloperGame{}, errInvalidGameState
+		}
+		s.games[index].Status = "reviewing"
+		return developerGameFromGame(s.games[index], 0), nil
+	}
+	return DeveloperGame{}, errors.New("game not found")
+}
+
+func (s *Store) DeleteDeveloperGame(username string, id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	author := "@" + strings.TrimSpace(username)
+	for index, item := range s.games {
+		if item.ID != id {
+			continue
+		}
+		if item.Author != author {
+			return errNotGameOwner
+		}
+		if item.Status != "draft" && item.Status != "rejected" && item.Status != "offline" {
+			return errInvalidGameState
+		}
+		s.games = append(s.games[:index], s.games[index+1:]...)
+		delete(s.gameLikes, id)
+		return nil
+	}
+	return errors.New("game not found")
 }
 
 func (s *Store) DownloadRepo(id int64) (Repo, error) {
@@ -699,3 +807,84 @@ func Search(items []Game, posts []ForumPost, repos []Repo, keyword string) (map[
 }
 
 func IDString(id int64) string { return strconv.FormatInt(id, 10) }
+
+var (
+	errNotGameOwner     = errors.New("not game owner")
+	errInvalidGameState = errors.New("game status does not allow this operation")
+)
+
+func IsNotGameOwner(err error) bool {
+	return errors.Is(err, errNotGameOwner)
+}
+
+func IsInvalidGameState(err error) bool {
+	return errors.Is(err, errInvalidGameState)
+}
+
+func ErrNotGameOwner() error {
+	return errNotGameOwner
+}
+
+func ErrInvalidGameState() error {
+	return errInvalidGameState
+}
+
+func developerGameFromGame(item Game, downloads int64) DeveloperGame {
+	return DeveloperGame{
+		ID:             item.ID,
+		Title:          item.Title,
+		Glyph:          defaultString(item.Glyph, "◆"),
+		Cover:          item.Cover,
+		CoverURL:       item.CoverURL,
+		Status:         item.Status,
+		Genre:          item.Genre,
+		Engine:         item.Engine,
+		Version:        "v1.0.0",
+		Plays:          parseCount(item.Plays),
+		Downloads:      downloads,
+		Likes:          item.Likes,
+		ReviewProgress: reviewProgress(item.Status),
+		ReviewMessage:  reviewMessage(item.Status),
+		CreatedAt:      item.CreatedAt,
+		UpdatedAt:      item.CreatedAt,
+		PlayURL:        item.PlayURL,
+		SourceURL:      item.SourceURL,
+	}
+}
+
+func reviewProgress(status string) int {
+	switch status {
+	case "published":
+		return 100
+	case "reviewing":
+		return 30
+	case "rejected":
+		return 100
+	case "offline":
+		return 0
+	default:
+		return 0
+	}
+}
+
+func reviewMessage(status string) string {
+	switch status {
+	case "published":
+		return "已发布"
+	case "reviewing":
+		return "等待审核"
+	case "rejected":
+		return "审核未通过"
+	case "offline":
+		return "已下架"
+	default:
+		return ""
+	}
+}
+
+func defaultString(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}

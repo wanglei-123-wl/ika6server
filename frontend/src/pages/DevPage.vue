@@ -1,5 +1,6 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
+import { getDeveloperCenter, getDeveloperGames, resubmitDeveloperGame, urgeDeveloperGameReview } from '../api';
 import StateBlock from '../components/StateBlock.vue';
 
 const props = defineProps({
@@ -15,11 +16,30 @@ const props = defineProps({
     type: Object,
     default: null,
   },
+  refreshKey: {
+    type: Number,
+    default: 0,
+  },
 });
 
-const emit = defineEmits(['update:activeDocKey', 'upload', 'request-auth', 'notice']);
+const emit = defineEmits(['update:activeDocKey', 'upload', 'request-auth', 'notice', 'play-game']);
 
 const activeTab = ref('all');
+const loading = ref(false);
+const actionLoadingId = ref('');
+const errorText = ref('');
+const profile = ref(null);
+const stats = ref({
+  following: '0',
+  followers: '0',
+  totalLikes: '0',
+  works: 0,
+  totalPlays: '0',
+  totalDownloads: '0',
+  sponsorIncome: '0',
+  weeklyNewFollowers: '0',
+});
+const works = ref([]);
 
 const tabs = [
   { key: 'all', label: '全部作品' },
@@ -27,6 +47,7 @@ const tabs = [
   { key: 'reviewing', label: '审核中' },
   { key: 'rejected', label: '未通过' },
   { key: 'draft', label: '草稿箱' },
+  { key: 'offline', label: '已下架' },
   { key: 'docs', label: '开发者文档' },
 ];
 
@@ -50,8 +71,15 @@ const fallbackDocs = {
   },
 };
 
-const docs = computed(() => ({ ...fallbackDocs, ...props.devDocs }));
+const statusMeta = {
+  published: { label: '已发布', className: 'published' },
+  reviewing: { label: '审核中', className: 'reviewing' },
+  rejected: { label: '未通过', className: 'rejected' },
+  draft: { label: '草稿', className: 'draft' },
+  offline: { label: '已下架', className: 'draft' },
+};
 
+const docs = computed(() => ({ ...fallbackDocs, ...props.devDocs }));
 const currentDoc = computed(() => docs.value[props.activeDocKey] || {
   title: '内容加载中',
   sub: '正在读取开发者中心内容。',
@@ -59,32 +87,22 @@ const currentDoc = computed(() => docs.value[props.activeDocKey] || {
   code: '',
 });
 
-const works = ref([
-  { id: 1, title: '像素猫大冒险', glyph: '▲', cover: 1, status: 'published', genre: '平台跳跃', engine: 'Godot 4.3', version: 'v1.4.2', plays: '8.2k', downloads: '3.1k', likes: '1.2k', date: '2026-08-12 发布' },
-  { id: 2, title: '霓虹骑士', glyph: '►', cover: 2, status: 'published', genre: '竞速', engine: 'Godot 4.2', version: 'v2.0.1', plays: '5.4k', downloads: '2.2k', likes: '980', date: '2026-07-30 发布' },
-  { id: 3, title: '苔藓纪元', glyph: '✿', cover: 4, status: 'published', genre: '模拟经营', engine: 'Unity 6', version: 'v0.9.7', plays: '2.1k', downloads: '860', likes: '412', date: '2026-07-02 发布' },
-  { id: 4, title: '深渊回响 Demo', glyph: '◇', cover: 6, status: 'reviewing', genre: 'Roguelike', engine: 'Godot 4.3', version: 'v0.3.0', progress: 65, eta: '预计 2 小时内完成审核', date: '今天 09:12 提交' },
-  { id: 5, title: '末班地铁（重制版）', glyph: '✚', cover: 8, status: 'reviewing', genre: '恐怖解谜', engine: 'Unity 6', version: 'v1.0.0-rc', progress: 30, eta: '预计 6 小时内完成审核', date: '昨天 22:47 提交' },
-  { id: 6, title: '星河咖啡馆', glyph: '✿', cover: 5, status: 'rejected', genre: '休闲养成', engine: 'Godot 4.3', version: 'v0.8.0', reason: '含未授权 BGM 素材，请替换为原创或已授权素材后重新提交。', date: '2026-09-06 被驳回' },
-  { id: 7, title: '虚空回廊 Prologue', glyph: '◆', cover: 3, status: 'draft', genre: 'RPG', engine: 'Godot 4.3', version: '草稿', date: '昨天 23:41 编辑' },
-]);
-
-const statusMeta = {
-  published: { label: '已发布', className: 'published' },
-  reviewing: { label: '审核中', className: 'reviewing' },
-  rejected: { label: '未通过', className: 'rejected' },
-  draft: { label: '草稿', className: 'draft' },
-};
-
-const profileName = computed(() => props.currentUser?.name || 'Luna');
-const profileInitial = computed(() => props.currentUser?.initial || String(profileName.value).charAt(0).toUpperCase() || 'L');
-const profileLevel = computed(() => props.currentUser?.level || 'lv7');
+const displayProfile = computed(() => profile.value || {
+  name: props.currentUser?.name || '开发者',
+  initial: props.currentUser?.initial || 'U',
+  level: props.currentUser?.level || 'lv1',
+  verified: false,
+  bio: '',
+  location: '',
+  joinedAt: '',
+  engines: [],
+});
 
 const tabCounts = computed(() => works.value.reduce((result, work) => {
   result.all += 1;
   result[work.status] = (result[work.status] || 0) + 1;
   return result;
-}, { all: 0, published: 0, reviewing: 0, rejected: 0, draft: 0 }));
+}, { all: 0, published: 0, reviewing: 0, rejected: 0, draft: 0, offline: 0 }));
 
 const visibleWorks = computed(() => (
   activeTab.value === 'all'
@@ -92,15 +110,72 @@ const visibleWorks = computed(() => (
     : works.value.filter((work) => work.status === activeTab.value)
 ));
 
-function switchTab(key) {
-  activeTab.value = key;
-  if (key === 'docs' && !docs.value[props.activeDocKey]) {
-    emit('update:activeDocKey', 'quickstart');
+const profileMeta = computed(() => {
+  const parts = [];
+  if (displayProfile.value.location) parts.push(`IP·${displayProfile.value.location}`);
+  if (displayProfile.value.joinedAt) parts.push(`${formatDate(displayProfile.value.joinedAt)} 加入 ika6`);
+  if (displayProfile.value.engines?.length) parts.push(`常用引擎 ${displayProfile.value.engines.join(' / ')}`);
+  return parts.join(' · ');
+});
+
+function formatDate(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function formatWorkDate(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+async function loadCenter() {
+  if (!props.currentUser) {
+    profile.value = null;
+    works.value = [];
+    errorText.value = '';
+    return;
+  }
+
+  loading.value = true;
+  errorText.value = '';
+
+  try {
+    const data = await getDeveloperCenter(props.currentUser);
+    profile.value = data.profile;
+    stats.value = data.stats;
+    works.value = data.games;
+  } catch (error) {
+    works.value = [];
+    errorText.value = error?.status === 404
+      ? '后端还没有提供开发者中心接口'
+      : (error?.message || '开发者中心数据加载失败');
+  } finally {
+    loading.value = false;
   }
 }
 
-function selectDoc(key) {
-  emit('update:activeDocKey', key);
+async function switchTab(key) {
+  activeTab.value = key;
+  if (key === 'docs') {
+    if (!docs.value[props.activeDocKey]) emit('update:activeDocKey', 'quickstart');
+    return;
+  }
+  if (!props.currentUser) return;
+
+  loading.value = true;
+  errorText.value = '';
+  try {
+    works.value = await getDeveloperGames(key);
+  } catch (error) {
+    works.value = [];
+    errorText.value = error?.message || '作品列表加载失败';
+  } finally {
+    loading.value = false;
+  }
 }
 
 function requestUpload() {
@@ -112,17 +187,42 @@ function requestUpload() {
   emit('upload');
 }
 
-function resubmitWork(work) {
-  work.status = 'reviewing';
-  work.progress = 5;
-  work.eta = '已重新排队，等待审核';
-  work.date = '刚刚重新提交';
-  emit('notice', `已重新提交「${work.title}」`);
+async function resubmitWork(work) {
+  actionLoadingId.value = `resubmit-${work.id}`;
+  try {
+    await resubmitDeveloperGame(work.id);
+    emit('notice', `已重新提交「${work.title}」`);
+    await switchTab(activeTab.value);
+  } catch (error) {
+    emit('notice', error?.message || '重新提交失败');
+  } finally {
+    actionLoadingId.value = '';
+  }
 }
 
-function notify(message) {
+async function urgeReview(work) {
+  actionLoadingId.value = `urge-${work.id}`;
+  try {
+    const result = await urgeDeveloperGameReview(work.id);
+    emit('notice', result?.changed === false ? '今天已经催过，请明天再试' : '已提交催审提醒');
+  } catch (error) {
+    emit('notice', error?.message || '催审失败');
+  } finally {
+    actionLoadingId.value = '';
+  }
+}
+
+function selectDoc(key) {
+  emit('update:activeDocKey', key);
+}
+
+function notice(message) {
   emit('notice', message);
 }
+
+onMounted(loadCenter);
+watch(() => props.currentUser?.id, loadCenter);
+watch(() => props.refreshKey, loadCenter);
 </script>
 
 <template>
@@ -132,38 +232,39 @@ function notify(message) {
         <div class="pb-bg"></div>
         <div class="pb-inner">
           <div class="pb-ava-wrap">
-            <div class="pb-ava">{{ profileInitial }}</div>
-            <div class="pb-ava-badge" title="已认证开发者">✓</div>
+            <img v-if="displayProfile.avatarUrl" class="pb-ava-img" :src="displayProfile.avatarUrl" :alt="displayProfile.name">
+            <div v-else class="pb-ava">{{ displayProfile.initial }}</div>
+            <div v-if="displayProfile.verified" class="pb-ava-badge" title="已认证开发者">✓</div>
           </div>
           <div class="pb-info">
             <div class="pb-name-row">
-              <span class="pb-name">{{ profileName }}</span>
-              <span class="pb-verified">✓ 已认证开发者</span>
-              <span class="pb-lv">{{ profileLevel }}</span>
+              <span class="pb-name">{{ displayProfile.name }}</span>
+              <span v-if="displayProfile.verified" class="pb-verified">✓ 已认证开发者</span>
+              <span class="pb-lv">{{ displayProfile.level }}</span>
               <button v-if="!currentUser" class="pb-login-hint" type="button" @click="emit('request-auth')">登录后管理你自己的作品</button>
             </div>
-            <p class="pb-bio">像素是浪漫的最小单位。独立游戏开发者主页，用来管理作品、审核状态、数据表现和发布文档。</p>
-            <div class="pb-addr">IP·上海 · 2025-03 加入 ika6 · 常用引擎 Godot 4 / Unity</div>
+            <p class="pb-bio">{{ displayProfile.bio || '登录后这里会展示你的开发者资料、作品状态和真实运营数据。' }}</p>
+            <div v-if="profileMeta" class="pb-addr">{{ profileMeta }}</div>
             <div class="pb-stats">
-              <div class="pb-stat"><b>32</b><span>关注</span></div>
-              <div class="pb-stat"><b>18.2k</b><span>粉丝</span></div>
-              <div class="pb-stat"><b>124k</b><span>获赞</span></div>
-              <div class="pb-stat"><b>{{ tabCounts.all }}</b><span>作品</span></div>
+              <div class="pb-stat"><b>{{ stats.following }}</b><span>关注</span></div>
+              <div class="pb-stat"><b>{{ stats.followers }}</b><span>粉丝</span></div>
+              <div class="pb-stat"><b>{{ stats.totalLikes }}</b><span>获赞</span></div>
+              <div class="pb-stat"><b>{{ stats.works || tabCounts.all }}</b><span>作品</span></div>
             </div>
           </div>
           <div class="pb-actions">
             <button class="btn btn-primary" type="button" @click="requestUpload"><span>＋</span>上传新作品</button>
-            <button class="btn btn-ghost" type="button" @click="notify('资料编辑功能需要后端接口接入后开放')">编辑资料</button>
+            <button class="btn btn-ghost" type="button" @click="notice('资料编辑接口接通后即可开放')">编辑资料</button>
           </div>
         </div>
       </div>
 
       <div class="dash-strip">
-        <div class="dash-card"><div class="dc-ic p1">▶</div><div><div class="dc-num">12,847</div><div class="dc-lbl">总试玩 <span class="trend up">↑ 12.5%</span></div></div></div>
-        <div class="dash-card"><div class="dc-ic p2">↓</div><div><div class="dc-num">8,632</div><div class="dc-lbl">总下载 <span class="trend up">↑ 8.3%</span></div></div></div>
-        <div class="dash-card"><div class="dc-ic p3">♥</div><div><div class="dc-num">24.1k</div><div class="dc-lbl">总获赞 <span class="trend up">↑ 21.7%</span></div></div></div>
-        <div class="dash-card"><div class="dc-ic p4">¥</div><div><div class="dc-num">¥3,420</div><div class="dc-lbl">赞助收入 <span class="trend up">↑ 5.1%</span></div></div></div>
-        <div class="dash-card"><div class="dc-ic p5">＋</div><div><div class="dc-num">+486</div><div class="dc-lbl">本周新增粉丝</div></div></div>
+        <div class="dash-card"><div class="dc-ic p1">▶</div><div><div class="dc-num">{{ stats.totalPlays }}</div><div class="dc-lbl">总试玩 <span v-if="stats.playTrend" class="trend">{{ stats.playTrend }}</span></div></div></div>
+        <div class="dash-card"><div class="dc-ic p2">↓</div><div><div class="dc-num">{{ stats.totalDownloads }}</div><div class="dc-lbl">总下载 <span v-if="stats.downloadTrend" class="trend">{{ stats.downloadTrend }}</span></div></div></div>
+        <div class="dash-card"><div class="dc-ic p3">♥</div><div><div class="dc-num">{{ stats.totalLikes }}</div><div class="dc-lbl">总获赞 <span v-if="stats.likeTrend" class="trend">{{ stats.likeTrend }}</span></div></div></div>
+        <div class="dash-card"><div class="dc-ic p4">¥</div><div><div class="dc-num">{{ stats.sponsorIncome }}</div><div class="dc-lbl">赞助收入 <span v-if="stats.incomeTrend" class="trend">{{ stats.incomeTrend }}</span></div></div></div>
+        <div class="dash-card"><div class="dc-ic p5">＋</div><div><div class="dc-num">{{ stats.weeklyNewFollowers }}</div><div class="dc-lbl">本周新增粉丝</div></div></div>
       </div>
 
       <div class="ptab-row">
@@ -180,35 +281,42 @@ function notify(message) {
         </button>
       </div>
 
-      <div v-if="activeTab !== 'docs'" class="works-grid">
-        <article v-for="work in visibleWorks" :key="work.id" class="wk-card">
-          <div class="wk-cover" :class="`cover-${work.cover}`">
-            <span class="glyph">{{ work.glyph }}</span>
-            <span class="wk-status" :class="statusMeta[work.status]?.className">{{ statusMeta[work.status]?.label || '未知' }}</span>
-          </div>
-          <div class="wk-body">
-            <h2 class="wk-title">{{ work.title }}</h2>
-            <div class="wk-sub">{{ work.genre }} · {{ work.engine }} · {{ work.version }} · {{ work.date }}</div>
-            <div v-if="work.status === 'published'" class="wk-stats">
-              <span>试玩 <b>{{ work.plays }}</b></span>
-              <span>下载 <b>{{ work.downloads }}</b></span>
-              <span>点赞 <b>{{ work.likes }}</b></span>
+      <div v-if="activeTab !== 'docs'">
+        <StateBlock v-if="!currentUser" icon="登" title="请先登录" text="登录后可以查看你自己的作品、审核状态和真实数据。" />
+        <StateBlock v-else-if="loading" icon="载" title="正在加载开发者数据" text="正在从服务器读取你的作品和统计信息。" />
+        <StateBlock v-else-if="errorText" icon="错" title="开发者数据加载失败" :text="errorText" />
+        <div v-else-if="visibleWorks.length" class="works-grid">
+          <article v-for="work in visibleWorks" :key="work.id" class="wk-card">
+            <div class="wk-cover" :class="`cover-${work.cover}`">
+              <img v-if="work.coverUrl" class="wk-cover-img" :src="work.coverUrl" :alt="work.title">
+              <span v-else class="glyph">{{ work.glyph }}</span>
+              <span class="wk-status" :class="statusMeta[work.status]?.className">{{ statusMeta[work.status]?.label || work.status }}</span>
             </div>
-            <template v-else-if="work.status === 'reviewing'">
-              <div class="wk-progress"><i :style="{ width: `${work.progress}%` }"></i></div>
-              <div class="wk-eta">审核进度 {{ work.progress }}% · {{ work.eta }}</div>
-            </template>
-            <div v-else-if="work.status === 'rejected'" class="wk-reason"><b>驳回原因：</b>{{ work.reason }}</div>
-            <div v-else class="wk-eta">{{ work.date }} · 上传未完成</div>
-            <div class="wk-actions">
-              <button v-if="work.status === 'published'" class="btn btn-ghost" type="button" @click="notify(`「${work.title}」管理面板需要后端接口接入后开放`)">管理</button>
-              <button v-if="work.status === 'reviewing'" class="btn btn-ghost" type="button" @click="notify('已提交催审提醒')">催审</button>
-              <button v-if="work.status === 'rejected'" class="btn btn-primary" type="button" @click="resubmitWork(work)">重新提交</button>
-              <button v-if="work.status === 'draft'" class="btn btn-primary" type="button" @click="requestUpload">继续编辑</button>
+            <div class="wk-body">
+              <h2 class="wk-title">{{ work.title }}</h2>
+              <div class="wk-sub">{{ work.genre }} · {{ work.engine }}<template v-if="work.version"> · {{ work.version }}</template><template v-if="work.date"> · {{ formatWorkDate(work.date) }}</template></div>
+              <div v-if="work.status === 'published'" class="wk-stats">
+                <span>试玩 <b>{{ work.plays }}</b></span>
+                <span>下载 <b>{{ work.downloads }}</b></span>
+                <span>点赞 <b>{{ work.likes }}</b></span>
+              </div>
+              <template v-else-if="work.status === 'reviewing'">
+                <div class="wk-progress"><i :style="{ width: `${work.progress || 0}%` }"></i></div>
+                <div class="wk-eta">审核进度 {{ work.progress || 0 }}%<template v-if="work.eta"> · {{ work.eta }}</template></div>
+              </template>
+              <div v-else-if="work.status === 'rejected'" class="wk-reason"><b>驳回原因：</b>{{ work.reason || '后端暂未返回驳回原因' }}</div>
+              <div v-else class="wk-eta">{{ work.date ? formatWorkDate(work.date) : '未发布' }} · 上传未完成</div>
+              <div class="wk-actions">
+                <button v-if="work.status === 'published'" class="btn btn-ghost" type="button" @click="emit('play-game', work)">查看</button>
+                <button v-if="work.status === 'published'" class="btn btn-ghost" type="button" @click="notice('作品编辑接口接通后即可开放')">管理</button>
+                <button v-if="work.status === 'reviewing'" class="btn btn-ghost" type="button" :disabled="actionLoadingId === `urge-${work.id}`" @click="urgeReview(work)">催审</button>
+                <button v-if="work.status === 'rejected'" class="btn btn-primary" type="button" :disabled="actionLoadingId === `resubmit-${work.id}`" @click="resubmitWork(work)">重新提交</button>
+                <button v-if="work.status === 'draft'" class="btn btn-primary" type="button" @click="requestUpload">继续编辑</button>
+              </div>
             </div>
-          </div>
-        </article>
-        <StateBlock v-if="!visibleWorks.length" icon="作" title="这个分类下暂时没有作品" text="上传或审核完成后，作品会自动出现在对应分类里。" />
+          </article>
+        </div>
+        <StateBlock v-else icon="作" title="暂无作品" text="服务器还没有返回你的作品。上传新作品后会出现在这里。" />
       </div>
 
       <div v-else-if="Object.keys(docs).length" class="dev-layout">
@@ -300,18 +408,27 @@ function notify(message) {
   flex: 0 0 auto;
 }
 
-.pb-ava {
+.pb-ava,
+.pb-ava-img {
   width: 98px;
   height: 98px;
   border: 4px solid var(--bg);
   border-radius: 50%;
+  box-shadow: 0 10px 34px rgba(139, 92, 246, 0.42);
+}
+
+.pb-ava {
   display: grid;
   place-items: center;
   color: #fff;
   font-size: 40px;
   font-weight: 900;
   background: linear-gradient(135deg, #8b5cf6, #c026d3);
-  box-shadow: 0 10px 34px rgba(139, 92, 246, 0.42);
+}
+
+.pb-ava-img {
+  display: block;
+  object-fit: cover;
 }
 
 .pb-ava-badge {
@@ -534,6 +651,14 @@ function notify(message) {
   background:
     radial-gradient(circle at 24% 22%, rgba(255, 255, 255, 0.2), transparent 20%),
     linear-gradient(135deg, rgba(139, 92, 246, 0.52), rgba(34, 211, 238, 0.36));
+}
+
+.wk-cover-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .cover-2 { background: linear-gradient(135deg, rgba(244, 63, 94, 0.45), rgba(245, 158, 11, 0.36)); }

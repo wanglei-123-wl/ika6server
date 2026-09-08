@@ -35,20 +35,21 @@ import (
 )
 
 type app struct {
-	config     config.Config
-	database   *database.Database
-	users      users.Repository
-	auth       *auth.Service
-	posts      *posts.Store
-	files      *files.Store
-	play       *playdeploy.Service
-	audit      *audit.Service
-	auditLog   audit.Logger
-	blocklist  blocklist.Repository
-	reputation reputation.Repository
-	catalog    *catalog.Store
-	sqlCatalog *catalog.SQLRepository
-	httpServer *http.Server
+	config      config.Config
+	database    *database.Database
+	users       users.Repository
+	auth        *auth.Service
+	posts       *posts.Store
+	files       *files.Store
+	play        *playdeploy.Service
+	audit       *audit.Service
+	auditLog    audit.Logger
+	blocklist   blocklist.Repository
+	reputation  reputation.Repository
+	catalog     *catalog.Store
+	sqlCatalog  *catalog.SQLRepository
+	reviewUrges map[string]time.Time
+	httpServer  *http.Server
 }
 
 type response map[string]any
@@ -146,13 +147,14 @@ func main() {
 			YaraBin:     cfg.YaraBin,
 			YaraRules:   cfg.YaraRules,
 		}), sandbox.NewAnalyzer(), blocklistRepository),
-		play:       playdeploy.NewService(cfg.PlayDir),
-		audit:      audit.NewService(postStore),
-		auditLog:   auditLogger,
-		blocklist:  blocklistRepository,
-		reputation: reputationRepository,
-		catalog:    catalogStore,
-		sqlCatalog: sqlCatalog,
+		play:        playdeploy.NewService(cfg.PlayDir),
+		audit:       audit.NewService(postStore),
+		auditLog:    auditLogger,
+		blocklist:   blocklistRepository,
+		reputation:  reputationRepository,
+		catalog:     catalogStore,
+		sqlCatalog:  sqlCatalog,
+		reviewUrges: make(map[string]time.Time),
 	}
 
 	mux := http.NewServeMux()
@@ -203,6 +205,12 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/repos/{id}", a.handleRepo)
 	mux.HandleFunc("GET /api/repos/{id}/download", a.handleRepoDownload)
 	mux.HandleFunc("GET /api/dev-docs", a.handleDevDocs)
+	mux.HandleFunc("GET /api/developer/me", a.handleDeveloperMe)
+	mux.HandleFunc("GET /api/developer/stats", a.handleDeveloperStats)
+	mux.HandleFunc("GET /api/developer/games", a.handleDeveloperGames)
+	mux.HandleFunc("POST /api/developer/games/{id}/resubmit", a.handleDeveloperResubmitGame)
+	mux.HandleFunc("POST /api/developer/games/{id}/urge-review", a.handleDeveloperUrgeReview)
+	mux.HandleFunc("DELETE /api/developer/games/{id}", a.handleDeveloperDeleteGame)
 	mux.HandleFunc("PUT /api/admin/dev-docs", a.handleUpdateDevDocs)
 	mux.HandleFunc("GET /api/users/me/reputation", a.handleMyReputation)
 	mux.HandleFunc("GET /api/categories", a.handleCategories)
@@ -455,6 +463,141 @@ func (a *app) handleDevDocs(w http.ResponseWriter, r *http.Request) {
 			"code":  "npm install...",
 		},
 	})
+}
+
+func (a *app) handleDeveloperMe(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	writeAPI(w, http.StatusOK, developerProfile(user))
+}
+
+func (a *app) handleDeveloperStats(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	var (
+		stats catalog.DeveloperStats
+		err   error
+	)
+	if a.sqlCatalog != nil {
+		stats, err = a.sqlCatalog.DeveloperStats(r.Context(), user.ID)
+	} else {
+		stats = a.catalog.DeveloperStats(user.Username)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load developer stats")
+		return
+	}
+	writeAPI(w, http.StatusOK, stats)
+}
+
+func (a *app) handleDeveloperGames(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	if status == "" {
+		status = "all"
+	}
+	var (
+		items []catalog.DeveloperGame
+		err   error
+	)
+	if a.sqlCatalog != nil {
+		items, err = a.sqlCatalog.DeveloperGames(r.Context(), user.ID, status)
+	} else {
+		if !validDeveloperGameStatus(status) {
+			writeError(w, http.StatusUnprocessableEntity, "invalid game status")
+			return
+		}
+		items = a.catalog.DeveloperGames(user.Username, status)
+	}
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeAPI(w, http.StatusOK, items)
+}
+
+func (a *app) handleDeveloperResubmitGame(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	id, ok := routeID(w, r, "games")
+	if !ok {
+		return
+	}
+	var (
+		item catalog.DeveloperGame
+		err  error
+	)
+	if a.sqlCatalog != nil {
+		item, err = a.sqlCatalog.ResubmitDeveloperGame(r.Context(), user.ID, id)
+	} else {
+		item, err = a.catalog.ResubmitDeveloperGame(user.Username, id)
+	}
+	if !writeDeveloperGameOperationError(w, err) {
+		return
+	}
+	writeAPI(w, http.StatusOK, map[string]any{"id": item.ID, "status": item.Status, "message": "已重新提交审核"})
+}
+
+func (a *app) handleDeveloperUrgeReview(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	id, ok := routeID(w, r, "games")
+	if !ok {
+		return
+	}
+	changed := false
+	var err error
+	if a.sqlCatalog != nil {
+		changed, err = a.sqlCatalog.RecordDeveloperReviewUrge(r.Context(), user.ID, id)
+	} else {
+		changed, err = a.recordMemoryReviewUrge(user.Username, id)
+	}
+	if !writeDeveloperGameOperationError(w, err) {
+		return
+	}
+	message := "已提交催审提醒"
+	if !changed {
+		message = "今天已经提交过催审提醒"
+	}
+	writeAPI(w, http.StatusOK, map[string]any{"id": id, "message": message, "changed": changed})
+}
+
+func (a *app) handleDeveloperDeleteGame(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	id, ok := routeID(w, r, "games")
+	if !ok {
+		return
+	}
+	var err error
+	if a.sqlCatalog != nil {
+		err = a.sqlCatalog.DeleteDeveloperGame(r.Context(), user.ID, id)
+	} else {
+		err = a.catalog.DeleteDeveloperGame(user.Username, id)
+	}
+	if !writeDeveloperGameOperationError(w, err) {
+		return
+	}
+	if a.files != nil {
+		a.files.RemoveOwner(id)
+	}
+	if a.play != nil {
+		_ = a.play.Remove(id)
+	}
+	writeAPI(w, http.StatusOK, map[string]any{"id": id, "message": "已删除"})
 }
 
 func (a *app) handleUpdateDevDocs(w http.ResponseWriter, r *http.Request) {
@@ -1752,6 +1895,83 @@ func publicUser(user users.User, method string) map[string]any {
 		initial = strings.ToUpper(string([]rune(user.Username)[0]))
 	}
 	return map[string]any{"id": user.ID, "name": user.Username, "initial": initial, "avatar": "", "level": "lv1", "role": user.Role, "method": method}
+}
+
+func developerProfile(user users.User) map[string]any {
+	initial := "?"
+	if user.Username != "" {
+		initial = strings.ToUpper(string([]rune(user.Username)[0]))
+	}
+	return map[string]any{
+		"id":        user.ID,
+		"name":      user.Username,
+		"initial":   initial,
+		"avatarUrl": "",
+		"level":     "lv1",
+		"verified":  user.Role == users.RoleAdmin,
+		"bio":       "",
+		"location":  "",
+		"joinedAt":  user.CreatedAt.UTC().Format(time.RFC3339),
+		"engines":   []string{},
+	}
+}
+
+func validDeveloperGameStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "all", "published", "reviewing", "rejected", "draft", "offline":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *app) recordMemoryReviewUrge(username string, gameID int64) (bool, error) {
+	games := a.catalog.DeveloperGames(username, "all")
+	found := false
+	status := ""
+	for _, item := range games {
+		if item.ID == gameID {
+			found = true
+			status = item.Status
+			break
+		}
+	}
+	if !found {
+		if _, exists := a.catalog.Game(gameID); exists {
+			return false, catalog.ErrNotGameOwner()
+		}
+		return false, sql.ErrNoRows
+	}
+	if status != "reviewing" {
+		return false, catalog.ErrInvalidGameState()
+	}
+	if a.reviewUrges == nil {
+		a.reviewUrges = make(map[string]time.Time)
+	}
+	today := time.Now().UTC().Format("2006-01-02")
+	key := strconv.FormatInt(gameID, 10) + ":" + strings.TrimSpace(username) + ":" + today
+	if _, exists := a.reviewUrges[key]; exists {
+		return false, nil
+	}
+	a.reviewUrges[key] = time.Now().UTC()
+	return true, nil
+}
+
+func writeDeveloperGameOperationError(w http.ResponseWriter, err error) bool {
+	if err == nil {
+		return true
+	}
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeError(w, http.StatusNotFound, "game not found")
+	case catalog.IsNotGameOwner(err):
+		writeError(w, http.StatusForbidden, "not game owner")
+	case catalog.IsInvalidGameState(err):
+		writeError(w, http.StatusConflict, "game status does not allow this operation")
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
+	return false
 }
 
 func publishedPosts(items []catalog.ForumPost) []catalog.ForumPost {

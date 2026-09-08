@@ -1,6 +1,7 @@
 export * from './admin';
 export * from './auth';
 export * from './dev';
+export * from './developer';
 export * from './forum';
 export * from './games';
 export * from './home';

@@ -97,3 +97,16 @@ func TestGamePlayDeploymentsMigrationExists(t *testing.T) {
 		}
 	}
 }
+
+func TestDeveloperReviewUrgesMigrationExists(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "migrations", "009_developer_review_urges.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(content)
+	for _, fragment := range []string{"CREATE TABLE IF NOT EXISTS developer_review_urges", "UNIQUE (game_id, user_id, urged_on)", "idx_developer_review_urges_game_created_at"} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("developer review urges migration is missing %q", fragment)
+		}
+	}
+}

@@ -49,6 +49,7 @@ const postList = ref([]);
 const barList = ref([]);
 const repoList = ref([]);
 const devDocsMap = ref({});
+const developerRefreshKey = ref(0);
 const pageLoading = ref(false);
 const pageError = ref('');
 const searchKeyword = ref('');
@@ -201,6 +202,7 @@ async function submitUpload(payload) {
   try {
     await uploadGame(payload);
     uploadOpen.value = false;
+    developerRefreshKey.value += 1;
     showToast('游戏已提交，等待审核');
   } catch (error) {
     showApiStatusToast(error, {
@@ -584,9 +586,11 @@ watch(activeForumCat, async (cat) => {
         v-model:active-doc-key="activeDocKey"
         :dev-docs="devDocsMap"
         :current-user="currentUser"
+        :refresh-key="developerRefreshKey"
         @upload="uploadOpen = true"
         @request-auth="openAuth"
         @notice="showToast"
+        @play-game="openPlayer"
       />
       <AdminPage
         v-else-if="activeView === 'admin'"

@@ -26,15 +26,16 @@ import (
 func testApp() *app {
 	userStore := users.NewStoreWithAdmin("admin@test.com")
 	return &app{
-		config:     config.Config{TokenSecret: "test-secret"},
-		database:   &database.Database{},
-		users:      userStore,
-		auth:       auth.NewService(userStore, "test-secret"),
-		posts:      posts.NewStore(),
-		play:       playdeploy.NewService(""),
-		auditLog:   audit.NewMemoryLogger(),
-		catalog:    catalog.NewStore(),
-		reputation: reputation.NewStore(),
+		config:      config.Config{TokenSecret: "test-secret"},
+		database:    &database.Database{},
+		users:       userStore,
+		auth:        auth.NewService(userStore, "test-secret"),
+		posts:       posts.NewStore(),
+		play:        playdeploy.NewService(""),
+		auditLog:    audit.NewMemoryLogger(),
+		catalog:     catalog.NewStore(),
+		reputation:  reputation.NewStore(),
+		reviewUrges: make(map[string]time.Time),
 	}
 }
 
@@ -516,6 +517,111 @@ func TestThreadedCommentGuards(t *testing.T) {
 	handler.ServeHTTP(invalidTokenRead, request)
 	if invalidTokenRead.Code != http.StatusUnauthorized || !strings.Contains(invalidTokenRead.Body.String(), `"errorCode":"INVALID_TOKEN"`) {
 		t.Fatalf("invalid token read status = %d, body = %s", invalidTokenRead.Code, invalidTokenRead.Body.String())
+	}
+}
+
+func TestDeveloperCenterContracts(t *testing.T) {
+	a := testApp()
+	handler := testHandler(a)
+	token := registerTestUserWithCredentials(t, handler, "builder", "builder@test.com")
+	otherToken := registerTestUserWithCredentials(t, handler, "other", "other@test.com")
+
+	reviewing, err := a.catalog.AddGame("@builder", "动物混战", "summary", "HTML5", "休闲", "MIT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected, err := a.catalog.AddGame("@builder", "被退回作品", "summary", "Godot", "动作", "MIT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.catalog.ReviewGame(rejected.ID, "rejected"); err != nil {
+		t.Fatal(err)
+	}
+	otherGame, err := a.catalog.AddGame("@other", "别人的作品", "summary", "Unity", "冒险", "MIT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.catalog.ReviewGame(otherGame.ID, "rejected"); err != nil {
+		t.Fatal(err)
+	}
+
+	me := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/developer/me", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(me, request)
+	if me.Code != http.StatusOK || !strings.Contains(me.Body.String(), `"name":"builder"`) || !strings.Contains(me.Body.String(), `"engines":[]`) {
+		t.Fatalf("developer me failed: %d %s", me.Code, me.Body.String())
+	}
+
+	stats := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/developer/stats", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(stats, request)
+	if stats.Code != http.StatusOK || !strings.Contains(stats.Body.String(), `"works":2`) {
+		t.Fatalf("developer stats failed: %d %s", stats.Code, stats.Body.String())
+	}
+
+	games := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/developer/games?status=all", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(games, request)
+	if games.Code != http.StatusOK || !strings.Contains(games.Body.String(), `"title":"动物混战"`) || strings.Contains(games.Body.String(), `"别人的作品"`) {
+		t.Fatalf("developer games failed: %d %s", games.Code, games.Body.String())
+	}
+
+	urge := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/developer/games/"+catalog.IDString(reviewing.ID)+"/urge-review", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(urge, request)
+	if urge.Code != http.StatusOK || !strings.Contains(urge.Body.String(), `"changed":true`) {
+		t.Fatalf("developer urge failed: %d %s", urge.Code, urge.Body.String())
+	}
+	duplicateUrge := httptest.NewRecorder()
+	handler.ServeHTTP(duplicateUrge, request)
+	if duplicateUrge.Code != http.StatusOK || !strings.Contains(duplicateUrge.Body.String(), `"changed":false`) {
+		t.Fatalf("duplicate developer urge failed: %d %s", duplicateUrge.Code, duplicateUrge.Body.String())
+	}
+
+	forbiddenResubmit := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/developer/games/"+catalog.IDString(rejected.ID)+"/resubmit", nil)
+	request.Header.Set("Authorization", "Bearer "+otherToken)
+	handler.ServeHTTP(forbiddenResubmit, request)
+	if forbiddenResubmit.Code != http.StatusForbidden {
+		t.Fatalf("foreign resubmit status = %d, body = %s", forbiddenResubmit.Code, forbiddenResubmit.Body.String())
+	}
+
+	resubmit := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/developer/games/"+catalog.IDString(rejected.ID)+"/resubmit", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(resubmit, request)
+	if resubmit.Code != http.StatusOK || !strings.Contains(resubmit.Body.String(), `"status":"reviewing"`) {
+		t.Fatalf("developer resubmit failed: %d %s", resubmit.Code, resubmit.Body.String())
+	}
+
+	deletePublished := httptest.NewRecorder()
+	if _, err := a.catalog.ReviewGame(rejected.ID, "approved"); err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodDelete, "/api/developer/games/"+catalog.IDString(rejected.ID), nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(deletePublished, request)
+	if deletePublished.Code != http.StatusConflict {
+		t.Fatalf("published delete status = %d, body = %s", deletePublished.Code, deletePublished.Body.String())
+	}
+
+	deletable, err := a.catalog.AddGame("@builder", "可删除作品", "summary", "HTML5", "休闲", "MIT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.catalog.ReviewGame(deletable.ID, "rejected"); err != nil {
+		t.Fatal(err)
+	}
+	deleteGame := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodDelete, "/api/developer/games/"+catalog.IDString(deletable.ID), nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(deleteGame, request)
+	if deleteGame.Code != http.StatusOK || !strings.Contains(deleteGame.Body.String(), `"message":"已删除"`) {
+		t.Fatalf("developer delete failed: %d %s", deleteGame.Code, deleteGame.Body.String())
 	}
 }
 

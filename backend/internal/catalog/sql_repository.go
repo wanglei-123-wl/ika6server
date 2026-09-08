@@ -834,6 +834,167 @@ func (r *SQLRepository) DownloadGameSource(ctx context.Context, gameID int64) (G
 	return file, err
 }
 
+func (r *SQLRepository) DeveloperGames(ctx context.Context, ownerID int64, status string) ([]DeveloperGame, error) {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "" {
+		status = "all"
+	}
+	if status != "all" && status != "published" && status != "reviewing" && status != "rejected" && status != "draft" && status != "offline" {
+		return nil, errors.New("invalid game status")
+	}
+	statusFilter := ""
+	args := []any{ownerID}
+	if status != "all" {
+		statusFilter = "AND g.status = $2"
+		args = append(args, status)
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT g.id, g.title, g.engine, g.genre, g.status, g.cover_url,
+		       g.play_url, g.source_url, g.plays, g.likes, g.created_at, g.updated_at,
+		       COALESCE(files.downloads, 0)
+		FROM games g
+		LEFT JOIN (
+			SELECT game_id, SUM(downloads) AS downloads
+			FROM game_files
+			GROUP BY game_id
+		) files ON files.game_id = g.id
+		WHERE g.owner_id = $1 `+statusFilter+`
+		ORDER BY g.updated_at DESC, g.id DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]DeveloperGame, 0)
+	for rows.Next() {
+		item, err := scanDeveloperGame(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *SQLRepository) DeveloperStats(ctx context.Context, ownerID int64) (DeveloperStats, error) {
+	var stats DeveloperStats
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(plays), 0), COALESCE(SUM(likes), 0)
+		FROM games
+		WHERE owner_id = $1`, ownerID).Scan(&stats.Works, &stats.TotalPlays, &stats.TotalLikes)
+	if err != nil {
+		return DeveloperStats{}, err
+	}
+	err = r.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(f.downloads), 0)
+		FROM game_files f
+		JOIN games g ON g.id = f.game_id
+		WHERE g.owner_id = $1`, ownerID).Scan(&stats.TotalDownloads)
+	return stats, err
+}
+
+func (r *SQLRepository) ResubmitDeveloperGame(ctx context.Context, ownerID, gameID int64) (DeveloperGame, error) {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE games
+		SET status = 'reviewing', updated_at = now()
+		WHERE id = $1 AND owner_id = $2 AND status = 'rejected'`, gameID, ownerID)
+	if err != nil {
+		return DeveloperGame{}, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return DeveloperGame{}, err
+	}
+	if count == 0 {
+		return r.developerGameOperationError(ctx, ownerID, gameID)
+	}
+	return r.DeveloperGame(ctx, ownerID, gameID)
+}
+
+func (r *SQLRepository) DeleteDeveloperGame(ctx context.Context, ownerID, gameID int64) error {
+	result, err := r.db.ExecContext(ctx, `
+		DELETE FROM games
+		WHERE id = $1
+		  AND owner_id = $2
+		  AND status IN ('draft', 'rejected', 'offline')`, gameID, ownerID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		_, err := r.developerGameOperationError(ctx, ownerID, gameID)
+		return err
+	}
+	return nil
+}
+
+func (r *SQLRepository) RecordDeveloperReviewUrge(ctx context.Context, ownerID, gameID int64) (bool, error) {
+	result, err := r.db.ExecContext(ctx, `
+		INSERT INTO developer_review_urges (game_id, user_id)
+		SELECT id, owner_id
+		FROM games
+		WHERE id = $1 AND owner_id = $2 AND status = 'reviewing'
+		ON CONFLICT (game_id, user_id, urged_on) DO NOTHING`, gameID, ownerID)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if count == 0 {
+		var actualOwnerID int64
+		var status string
+		err := r.db.QueryRowContext(ctx, `SELECT owner_id, status FROM games WHERE id = $1`, gameID).Scan(&actualOwnerID, &status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, sql.ErrNoRows
+		}
+		if err != nil {
+			return false, err
+		}
+		if actualOwnerID != ownerID {
+			return false, errNotGameOwner
+		}
+		if status != "reviewing" {
+			return false, errInvalidGameState
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+func (r *SQLRepository) DeveloperGame(ctx context.Context, ownerID, gameID int64) (DeveloperGame, error) {
+	return scanDeveloperGame(r.db.QueryRowContext(ctx, `
+		SELECT g.id, g.title, g.engine, g.genre, g.status, g.cover_url,
+		       g.play_url, g.source_url, g.plays, g.likes, g.created_at, g.updated_at,
+		       COALESCE(files.downloads, 0)
+		FROM games g
+		LEFT JOIN (
+			SELECT game_id, SUM(downloads) AS downloads
+			FROM game_files
+			GROUP BY game_id
+		) files ON files.game_id = g.id
+		WHERE g.id = $1 AND g.owner_id = $2`, gameID, ownerID))
+}
+
+func (r *SQLRepository) developerGameOperationError(ctx context.Context, ownerID, gameID int64) (DeveloperGame, error) {
+	var actualOwnerID int64
+	var status string
+	err := r.db.QueryRowContext(ctx, `SELECT owner_id, status FROM games WHERE id = $1`, gameID).Scan(&actualOwnerID, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DeveloperGame{}, sql.ErrNoRows
+	}
+	if err != nil {
+		return DeveloperGame{}, err
+	}
+	if actualOwnerID != ownerID {
+		return DeveloperGame{}, errNotGameOwner
+	}
+	return DeveloperGame{}, errInvalidGameState
+}
+
 type SearchData struct {
 	Games []Game      `json:"games"`
 	Posts []ForumPost `json:"posts"`
@@ -1041,6 +1202,27 @@ func scanGame(row rowScanner) (Game, error) {
 		item.CreatedAt = createdAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 	item.HasSource = item.SourceURL != ""
+	return item, nil
+}
+
+func scanDeveloperGame(row rowScanner) (DeveloperGame, error) {
+	var item DeveloperGame
+	var createdAt, updatedAt sql.NullTime
+	err := row.Scan(&item.ID, &item.Title, &item.Engine, &item.Genre, &item.Status, &item.CoverURL,
+		&item.PlayURL, &item.SourceURL, &item.Plays, &item.Likes, &createdAt, &updatedAt, &item.Downloads)
+	if err != nil {
+		return DeveloperGame{}, err
+	}
+	item.Glyph = "◆"
+	item.Version = "v1.0.0"
+	item.ReviewProgress = reviewProgress(item.Status)
+	item.ReviewMessage = reviewMessage(item.Status)
+	if createdAt.Valid {
+		item.CreatedAt = createdAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
+	}
+	if updatedAt.Valid {
+		item.UpdatedAt = updatedAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
+	}
 	return item, nil
 }
 
