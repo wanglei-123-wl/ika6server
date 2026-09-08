@@ -117,6 +117,8 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+	} else {
+		log.Printf("ika6 backend persistence mode: memory; set IKA6_DATABASE_URL to enable PostgreSQL persistence")
 	}
 	postStore := posts.NewStore()
 	catalogStore := catalog.NewStore()
@@ -161,7 +163,7 @@ func main() {
 		Handler: withCORS(mux),
 	}
 
-	log.Printf("ika6 backend listening on %s", cfg.Addr)
+	log.Printf("ika6 backend listening on %s; persistence=%s", cfg.Addr, application.persistenceMode())
 	if err := application.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -228,10 +230,19 @@ func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, response{
-		"ok":      status == "ok",
-		"service": "ika6-backend",
-		"status":  status,
+		"ok":                 status == "ok",
+		"service":            "ika6-backend",
+		"status":             status,
+		"persistence":        a.persistenceMode(),
+		"databaseConfigured": strings.TrimSpace(a.config.DatabaseURL) != "",
 	})
+}
+
+func (a *app) persistenceMode() string {
+	if a != nil && a.sqlCatalog != nil && strings.TrimSpace(a.config.DatabaseURL) != "" {
+		return "postgres"
+	}
+	return "memory"
 }
 
 func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
