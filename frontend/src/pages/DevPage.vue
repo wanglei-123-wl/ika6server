@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue';
-import { getDeveloperCenter, getDeveloperGames, resubmitDeveloperGame, urgeDeveloperGameReview } from '../api';
+import { deleteDeveloperGame, getDeveloperCenter, getDeveloperGames, resubmitDeveloperGame, urgeDeveloperGameReview } from '../api';
 import StateBlock from '../components/StateBlock.vue';
 
 const props = defineProps({
@@ -110,6 +110,10 @@ const visibleWorks = computed(() => (
     : works.value.filter((work) => work.status === activeTab.value)
 ));
 
+function canDeleteWork(work) {
+  return ['draft', 'rejected', 'offline'].includes(work?.status);
+}
+
 const profileMeta = computed(() => {
   const parts = [];
   if (displayProfile.value.location) parts.push(`IP·${displayProfile.value.location}`);
@@ -207,6 +211,27 @@ async function urgeReview(work) {
     emit('notice', result?.changed === false ? '今天已经催过，请明天再试' : '已提交催审提醒');
   } catch (error) {
     emit('notice', error?.message || '催审失败');
+  } finally {
+    actionLoadingId.value = '';
+  }
+}
+
+async function deleteWork(work) {
+  if (!canDeleteWork(work)) {
+    emit('notice', '当前状态不支持删除');
+    return;
+  }
+
+  const confirmed = window.confirm(`确定删除「${work.title}」吗？删除后不能恢复。`);
+  if (!confirmed) return;
+
+  actionLoadingId.value = `delete-${work.id}`;
+  try {
+    await deleteDeveloperGame(work.id);
+    emit('notice', `已删除「${work.title}」`);
+    await switchTab(activeTab.value);
+  } catch (error) {
+    emit('notice', error?.message || '删除失败');
   } finally {
     actionLoadingId.value = '';
   }
@@ -312,6 +337,7 @@ watch(() => props.refreshKey, loadCenter);
                 <button v-if="work.status === 'reviewing'" class="btn btn-ghost" type="button" :disabled="actionLoadingId === `urge-${work.id}`" @click="urgeReview(work)">催审</button>
                 <button v-if="work.status === 'rejected'" class="btn btn-primary" type="button" :disabled="actionLoadingId === `resubmit-${work.id}`" @click="resubmitWork(work)">重新提交</button>
                 <button v-if="work.status === 'draft'" class="btn btn-primary" type="button" @click="requestUpload">继续编辑</button>
+                <button v-if="canDeleteWork(work)" class="btn btn-danger-soft" type="button" :disabled="actionLoadingId === `delete-${work.id}`" @click="deleteWork(work)">删除</button>
               </div>
             </div>
           </article>
@@ -755,6 +781,18 @@ watch(() => props.refreshKey, loadCenter);
 .wk-actions .btn {
   padding: 6px 14px;
   font-size: 12px;
+}
+
+.btn-danger-soft {
+  border: 1px solid rgba(244, 63, 94, 0.34);
+  color: #fb7185;
+  background: rgba(244, 63, 94, 0.08);
+}
+
+.btn-danger-soft:hover:not(:disabled) {
+  border-color: rgba(244, 63, 94, 0.56);
+  color: #fff;
+  background: rgba(244, 63, 94, 0.76);
 }
 
 .dev-layout {
