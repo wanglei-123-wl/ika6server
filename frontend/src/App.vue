@@ -583,6 +583,10 @@ watch(activeForumCat, async (cat) => {
         v-else-if="activeView === 'dev'"
         v-model:active-doc-key="activeDocKey"
         :dev-docs="devDocsMap"
+        :current-user="currentUser"
+        @upload="uploadOpen = true"
+        @request-auth="openAuth"
+        @notice="showToast"
       />
       <AdminPage
         v-else-if="activeView === 'admin'"
