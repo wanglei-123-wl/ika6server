@@ -58,9 +58,34 @@ go test .\internal\database -run TestPostgresIntegration
 
 The Compose file is only a local verification environment; it is not started by the API.
 
+## Local PostgreSQL Startup
+
+For local testing with persistent users, games, comments, likes, and upload metadata, start the API through the PostgreSQL helper script:
+
+```powershell
+cd F:\游戏社区\ika6server\backend
+.\scripts\start-api-postgres.ps1
+```
+
+This script starts `docker-compose.postgres.yml`, sets `IKA6_DATABASE_URL`, applies migrations, and then starts `cmd/api`.
+
+To only start and migrate PostgreSQL:
+
+```powershell
+.\scripts\start-postgres.ps1
+```
+
+To verify that the database path is reachable:
+
+```powershell
+.\scripts\verify-postgres.ps1
+```
+
+If the API is started with plain `go run .\cmd\api` and `IKA6_DATABASE_URL` is not set in that same shell/process, the backend intentionally falls back to in-memory development stores.
+
 ## Current Status
 
-The first version uses in-memory stores so the API shape can be tested before wiring PostgreSQL into repositories.
+The backend supports PostgreSQL persistence when `IKA6_DATABASE_URL` is configured. Without that variable, it uses in-memory stores so the API shape can still be tested during development.
 
 Uploaded files are written to a temporary directory, scanned with ClamAV and optional YARA rules, then moved into the upload directory only when the scan is clean. Archive uploads are extracted with 7-Zip into a temporary scan directory and scanned recursively before approval.
 

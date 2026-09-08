@@ -129,6 +129,21 @@ func TestAuthMeRequiresBearerToken(t *testing.T) {
 	}
 }
 
+func TestHealthReportsPersistenceMode(t *testing.T) {
+	a := testApp()
+	recorder := httptest.NewRecorder()
+	testHandler(a).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("health status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"persistence":"memory"`) {
+		t.Fatalf("health response missing memory persistence mode: %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"databaseConfigured":false`) {
+		t.Fatalf("health response missing databaseConfigured=false: %s", recorder.Body.String())
+	}
+}
+
 func TestLoginRejectsWrongPassword(t *testing.T) {
 	a := testApp()
 	handler := testHandler(a)
