@@ -4,7 +4,7 @@ import { getAuthToken, getAuthTokenPersistence } from '../api/http';
 
 const USER_CACHE_KEY = 'ika6_current_user';
 const LEGACY_USER_CACHE_KEY = 'pf_user';
-const PLATFORM_ADMIN_ACCOUNT = 'yaochenAi.18700021044.com@#$%';
+const PLATFORM_ADMIN_ACCOUNT = 'yaochenAi.18700021044.com.yc';
 
 const state = reactive({
   user: null,

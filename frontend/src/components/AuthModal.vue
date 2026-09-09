@@ -30,7 +30,7 @@ const showRegisterPassword = ref(false);
 const showRegisterPasswordConfirm = ref(false);
 const errors = ref({});
 const loading = ref(false);
-const platformAdminAccount = 'yaochenAi.18700021044.com@#$%';
+const platformAdminAccount = 'yaochenAi.18700021044.com.yc';
 
 function reset() {
   tab.value = props.defaultTab;
