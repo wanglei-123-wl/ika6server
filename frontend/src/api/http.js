@@ -56,15 +56,16 @@ export function resolveApiAssetUrl(path) {
   return new URL(path, API_BASE_URL || window.location.origin).toString();
 }
 
-function normalizePayload(payload) {
+function normalizePayload(payload, { notifyExpired = true, status = 0 } = {}) {
   if (payload && typeof payload === 'object' && 'code' in payload) {
     if (payload.code !== 0) {
-      if (payload.code === 401) {
+      if (payload.code === 401 && notifyExpired) {
         setAuthToken('');
         notifyAuthExpired();
       }
 
       throw new ApiError(payload.message || '请求失败，请稍后重试', {
+        status,
         code: payload.code,
         errorCode: payload.errorCode,
         data: payload.data,
@@ -77,6 +78,7 @@ function normalizePayload(payload) {
   if (payload && typeof payload === 'object' && 'success' in payload) {
     if (!payload.success) {
       throw new ApiError(payload.message || '请求失败，请稍后重试', {
+        status,
         code: payload.code,
         errorCode: payload.errorCode,
         data: payload.data,
@@ -136,7 +138,7 @@ export async function request(path, options = {}) {
   }
 
   if (!response.ok) {
-    if (response.status === 401) {
+    if (response.status === 401 && auth) {
       setAuthToken('');
       notifyAuthExpired();
     }
@@ -148,5 +150,5 @@ export async function request(path, options = {}) {
     });
   }
 
-  return normalizePayload(payload);
+  return normalizePayload(payload, { notifyExpired: auth, status: response.status });
 }

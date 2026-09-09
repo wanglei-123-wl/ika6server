@@ -40,6 +40,7 @@ const currentGame = ref(null);
 const currentPlayUrl = ref('');
 const playerLoading = ref(false);
 const toast = ref('');
+const toastType = ref('success');
 const homeStats = ref({ projects: 0, plays: 0, contributors: 0, price: 0 });
 const marketStats = ref({ projects: 0, weeklyActive: 0, downloads: '0', price: 0 });
 const homeGames = ref([]);
@@ -95,7 +96,7 @@ function resolveBackendUrl(path) {
 
 function showApiStatusToast(error, messages) {
   const fallback = messages.default || error?.message || '操作失败，请稍后重试';
-  showToast(messages[error?.status] || fallback);
+  showToast(messages[error?.status] || fallback, 'error');
 }
 
 async function openPlayer(game) {
@@ -126,8 +127,9 @@ async function openPlayer(game) {
   }
 }
 
-function showToast(message) {
+function showToast(message, type = '') {
   toast.value = message;
+  toastType.value = type || (/失败|错误|过期|不能|不可用|无权限|不存在/.test(message) ? 'error' : 'success');
   window.clearTimeout(showToast.timer);
   showToast.timer = window.setTimeout(() => {
     toast.value = '';
@@ -256,7 +258,7 @@ async function logout() {
 function handleAuthExpired() {
   authStore.expireSession();
   accountMenuOpen.value = false;
-  showToast('登录已过期，请重新登录');
+  showToast('登录已过期，请重新登录', 'error');
 }
 
 function accountAction(label) {
@@ -643,6 +645,6 @@ watch(isAdmin, (allowed) => {
       </div>
     </div>
 
-    <div v-if="toast" class="toast show"><span class="ic">✓</span><span>{{ toast }}</span></div>
+    <div v-if="toast" class="toast show" :class="toastType"><span class="ic">{{ toastType === 'error' ? '!' : '✓' }}</span><span>{{ toast }}</span></div>
   </div>
 </template>
