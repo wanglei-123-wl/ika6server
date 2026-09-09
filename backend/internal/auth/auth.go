@@ -19,6 +19,13 @@ import (
 
 const passwordIterations = 210000
 
+var (
+	ErrInvalidCredentials  = errors.New("invalid email or password")
+	ErrAccountNotFound     = fmt.Errorf("account not found: %w", ErrInvalidCredentials)
+	ErrPasswordMismatch    = fmt.Errorf("password verification failed: %w", ErrInvalidCredentials)
+	ErrInvalidPasswordHash = errors.New("stored password hash is invalid")
+)
+
 type Service struct {
 	users       users.Repository
 	tokenSecret []byte
@@ -69,9 +76,19 @@ func (s *Service) Login(email, password string) (users.User, string, error) {
 }
 
 func (s *Service) LoginWithRemember(email, password string, remember bool) (users.User, string, error) {
-	user, ok := s.users.FindByEmail(email)
-	if !ok || !CheckPassword(password, user.PasswordHash) {
-		return users.User{}, "", errors.New("invalid email or password")
+	user, err := s.users.FindByEmail(email)
+	if errors.Is(err, users.ErrNotFound) {
+		return users.User{}, "", ErrAccountNotFound
+	}
+	if err != nil {
+		return users.User{}, "", fmt.Errorf("lookup login account: %w", err)
+	}
+	matches, err := checkPassword(password, user.PasswordHash)
+	if err != nil {
+		return users.User{}, "", err
+	}
+	if !matches {
+		return users.User{}, "", ErrPasswordMismatch
 	}
 
 	token := s.SignTokenWithTTL(user.ID, tokenTTL(remember))
@@ -244,28 +261,33 @@ func HashPassword(password string) (string, error) {
 }
 
 func CheckPassword(password, stored string) bool {
+	matches, err := checkPassword(password, stored)
+	return err == nil && matches
+}
+
+func checkPassword(password, stored string) (bool, error) {
 	parts := strings.Split(stored, "$")
 	if len(parts) != 4 || parts[0] != "hmac-sha256-stretch" {
-		return false
+		return false, ErrInvalidPasswordHash
 	}
 
 	iterations, err := strconv.Atoi(parts[1])
 	if err != nil || iterations <= 0 {
-		return false
+		return false, ErrInvalidPasswordHash
 	}
 
 	salt, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		return false
+	if err != nil || len(salt) == 0 {
+		return false, ErrInvalidPasswordHash
 	}
 
 	expected, err := base64.RawURLEncoding.DecodeString(parts[3])
-	if err != nil {
-		return false
+	if err != nil || len(expected) != sha256.Size {
+		return false, ErrInvalidPasswordHash
 	}
 
 	actual := stretch([]byte(password), salt, iterations)
-	return subtle.ConstantTimeCompare(actual, expected) == 1
+	return subtle.ConstantTimeCompare(actual, expected) == 1, nil
 }
 
 func stretch(password, salt []byte, iterations int) []byte {

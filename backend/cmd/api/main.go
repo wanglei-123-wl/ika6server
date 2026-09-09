@@ -58,6 +58,7 @@ type response map[string]any
 
 const (
 	errorCodeInvalidCredentials = "INVALID_CREDENTIALS"
+	errorCodeAuthUnavailable    = "AUTH_SERVICE_UNAVAILABLE"
 	errorCodeEmailExists        = "EMAIL_EXISTS"
 	errorCodeInvalidToken       = "INVALID_TOKEN"
 	errorCodeForbidden          = "FORBIDDEN"
@@ -324,6 +325,8 @@ func (a *app) handleMyReputation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
+	requestID := newLoginRequestID()
+	w.Header().Set("X-Request-ID", requestID)
 	var input struct {
 		Account  string `json:"account"`
 		Email    string `json:"email"`
@@ -331,6 +334,7 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Remember bool   `json:"remember"`
 	}
 	if !decodeJSON(w, r, &input) {
+		logLoginOutcome(r, requestID, "invalid_request", false, nil)
 		return
 	}
 
@@ -338,13 +342,54 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if email == "" {
 		email = input.Account
 	}
+	adminAccount := strings.ToLower(strings.TrimSpace(a.config.AdminAccount))
+	configuredAdmin := adminAccount != "" && strings.ToLower(strings.TrimSpace(email)) == adminAccount
 	user, token, err := a.auth.LoginWithRemember(email, input.Password, input.Remember)
 	if err != nil {
-		writeErrorCode(w, http.StatusUnauthorized, errorCodeInvalidCredentials, "账号或密码错误")
+		outcome := "lookup_error"
+		switch {
+		case errors.Is(err, auth.ErrAccountNotFound):
+			outcome = "account_not_found"
+		case errors.Is(err, auth.ErrPasswordMismatch):
+			outcome = "password_mismatch"
+		case errors.Is(err, auth.ErrInvalidPasswordHash):
+			outcome = "invalid_password_hash"
+		}
+		logLoginOutcome(r, requestID, outcome, configuredAdmin, err)
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			writeErrorCode(w, http.StatusUnauthorized, errorCodeInvalidCredentials, "账号或密码错误")
+		} else {
+			writeErrorCode(w, http.StatusServiceUnavailable, errorCodeAuthUnavailable, "登录服务暂时不可用，请联系管理员")
+		}
 		return
 	}
 
+	logLoginOutcome(r, requestID, "success", configuredAdmin, nil)
 	writeAPI(w, http.StatusOK, map[string]any{"user": a.publicUser(user, "password"), "token": token})
+}
+
+func newLoginRequestID() string {
+	value := make([]byte, 12)
+	if _, err := rand.Read(value); err != nil {
+		return "login-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return base64.RawURLEncoding.EncodeToString(value)
+}
+
+func logLoginOutcome(r *http.Request, requestID, outcome string, configuredAdmin bool, err error) {
+	// Log only classified outcomes, never credentials or raw database errors.
+	sqlState := ""
+	var stateError interface{ SQLState() string }
+	if errors.As(err, &stateError) {
+		candidate := stateError.SQLState()
+		if len(candidate) == 5 && strings.IndexFunc(candidate, func(c rune) bool {
+			return !(c >= '0' && c <= '9') && !(c >= 'A' && c <= 'Z')
+		}) == -1 {
+			sqlState = candidate
+		}
+	}
+	log.Printf("auth_login request_id=%s outcome=%s configured_admin=%t browser_request=%t sqlstate=%q",
+		requestID, outcome, configuredAdmin, r.Header.Get("Origin") != "", sqlState)
 }
 
 func (a *app) handleMe(w http.ResponseWriter, r *http.Request) {
@@ -370,61 +415,8 @@ func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleSocialLogin(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Provider string `json:"provider"`
-		Method   string `json:"method"`
-		Account  string `json:"account"`
-		Email    string `json:"email"`
-		Name     string `json:"name"`
-		Username string `json:"username"`
-	}
-	if !decodeJSON(w, r, &input) {
-		return
-	}
-	provider := strings.TrimSpace(input.Provider)
-	if provider == "" {
-		provider = strings.TrimSpace(input.Method)
-	}
-	email := strings.ToLower(strings.TrimSpace(input.Email))
-	if email == "" {
-		email = strings.ToLower(strings.TrimSpace(input.Account))
-	}
-	username := strings.TrimSpace(input.Username)
-	if username == "" {
-		username = strings.TrimSpace(input.Name)
-	}
-	if provider == "" || email == "" {
-		writeErrorCode(w, http.StatusBadRequest, errorCodeValidation, "登录方式和账号不能为空")
-		return
-	}
-	if username == "" {
-		username = strings.TrimSpace(strings.Split(email, "@")[0])
-	}
-	if username == "" {
-		writeErrorCode(w, http.StatusBadRequest, errorCodeValidation, "用户名不能为空")
-		return
-	}
-
-	user, ok := a.users.FindByEmail(email)
-	if !ok {
-		hash, err := auth.HashPassword(randomLocalPassword())
-		if err != nil {
-			writeErrorCode(w, http.StatusInternalServerError, errorCodeInternal, "创建账号失败")
-			return
-		}
-		user, err = a.users.Create(username, email, hash)
-		if err != nil {
-			var exists bool
-			user, exists = a.users.FindByEmail(email)
-			if !exists {
-				writeErrorCode(w, http.StatusBadRequest, errorCodeValidation, err.Error())
-				return
-			}
-		}
-	}
-
-	token := a.auth.SignToken(user.ID)
-	writeAPI(w, http.StatusOK, map[string]any{"user": a.publicUser(user, provider), "token": token})
+	// Client-supplied email/provider is not proof of an OAuth identity.
+	writeErrorCode(w, http.StatusNotImplemented, errorCodeNotImplemented, "第三方登录暂未开放")
 }
 
 func (a *app) handleHome(w http.ResponseWriter, r *http.Request) {
@@ -2399,14 +2391,18 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func writeErrorCode(w http.ResponseWriter, status int, errorCode, message string) {
-	writeJSON(w, status, response{
+	payload := response{
 		"code":      status,
 		"errorCode": errorCode,
 		"message":   message,
 		"data":      nil,
 		"success":   false,
 		"error":     message,
-	})
+	}
+	if requestID := w.Header().Get("X-Request-ID"); requestID != "" {
+		payload["requestId"] = requestID
+	}
+	writeJSON(w, status, payload)
 }
 
 func errorCodeFor(status int, message string) string {
@@ -2691,19 +2687,12 @@ func sanitizeHeader(value string) string {
 	return strings.NewReplacer("\r", "", "\n", "", `"`, "").Replace(value)
 }
 
-func randomLocalPassword() string {
-	value := make([]byte, 32)
-	if _, err := rand.Read(value); err != nil {
-		return strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
-	}
-	return base64.RawURLEncoding.EncodeToString(value)
-}
-
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

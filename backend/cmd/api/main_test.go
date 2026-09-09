@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -275,53 +277,143 @@ func TestLogoutRevokesCurrentToken(t *testing.T) {
 	}
 }
 
-func TestSocialLoginCreatesAndReusesLocalAccount(t *testing.T) {
+func TestSocialLoginFailsClosed(t *testing.T) {
 	a := testApp()
 	handler := testHandler(a)
+	_ = registerTestUserWithCredentials(t, handler, "admin", "admin@test.com")
+	before, _ := a.users.Counts(time.Now())
+	for _, body := range []string{
+		`{"provider":"GitHub","account":"new@test.com","name":"new"}`,
+		`{"provider":"Google","email":"admin@test.com","username":"admin"}`,
+		`{"method":"GitHub","account":"admin@test.com"}`,
+	} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/auth/social-login", strings.NewReader(body))
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotImplemented || !strings.Contains(recorder.Body.String(), `"errorCode":"NOT_IMPLEMENTED"`) {
+			t.Fatalf("social login must fail closed: %d %s", recorder.Code, recorder.Body.String())
+		}
+		if strings.Contains(recorder.Body.String(), `"token"`) {
+			t.Fatal("unverified social login must not issue a token")
+		}
+	}
+	after, _ := a.users.Counts(time.Now())
+	if after != before {
+		t.Fatal("disabled social login must not create accounts")
+	}
+}
 
-	first := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/auth/social-login", strings.NewReader(`{"provider":"GitHub","account":"octo@test.com","name":"octo"}`))
-	request.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(first, request)
-	if first.Code != http.StatusOK {
-		t.Fatalf("social login status = %d, body = %s", first.Code, first.Body.String())
-	}
-	var firstEnvelope struct {
-		Data struct {
-			Token string `json:"token"`
-			User  struct {
-				ID     int64  `json:"id"`
-				Method string `json:"method"`
-			} `json:"user"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(first.Body.Bytes(), &firstEnvelope); err != nil {
+type loginLookupFailure struct {
+	users.Repository
+	err error
+}
+
+func (r loginLookupFailure) FindByEmail(string) (users.User, error) {
+	return users.User{}, r.err
+}
+
+type loginSQLStateError struct{ state string }
+
+func (e loginSQLStateError) Error() string    { return "private-database-detail" }
+func (e loginSQLStateError) SQLState() string { return e.state }
+
+func TestLoginDiagnosticsAndErrorClassification(t *testing.T) {
+	const password = "private-test-password"
+	hash, err := auth.HashPassword(password)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if firstEnvelope.Data.Token == "" || firstEnvelope.Data.User.Method != "GitHub" {
-		t.Fatalf("unexpected social login response: %s", first.Body.String())
-	}
+	for _, tc := range []struct {
+		name      string
+		account   string
+		password  string
+		hash      string
+		lookupErr error
+		status    int
+		errorCode string
+		outcome   string
+		browser   bool
+		sqlState  string
+	}{
+		{name: "success", account: "admin@test.com", password: password, hash: hash, status: 200, outcome: "success", browser: true},
+		{name: "wrong password", account: "admin@test.com", password: "wrong-password", hash: hash, status: 401, errorCode: errorCodeInvalidCredentials, outcome: "password_mismatch"},
+		{name: "missing account", account: "missing@test.com", password: password, hash: hash, status: 401, errorCode: errorCodeInvalidCredentials, outcome: "account_not_found"},
+		{name: "bad stored hash", account: "admin@test.com", password: password, hash: "private-malformed-hash", status: 503, errorCode: errorCodeAuthUnavailable, outcome: "invalid_password_hash", browser: true},
+		{name: "lookup error", account: "admin@test.com", password: password, hash: hash, lookupErr: errors.New("private-database-detail"), status: 503, errorCode: errorCodeAuthUnavailable, outcome: "lookup_error", browser: true},
+		{name: "sqlstate", account: "admin@test.com", password: password, hash: hash, lookupErr: loginSQLStateError{"08006"}, status: 503, errorCode: errorCodeAuthUnavailable, outcome: "lookup_error", sqlState: "08006"},
+		{name: "unsafe sqlstate", account: "admin@test.com", password: password, hash: hash, lookupErr: loginSQLStateError{"leak\n"}, status: 503, errorCode: errorCodeAuthUnavailable, outcome: "lookup_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := testApp()
+			a.config.AdminAccount = "admin@test.com"
+			if _, err := a.users.Create("admin", "admin@test.com", tc.hash); err != nil {
+				t.Fatal(err)
+			}
+			if tc.lookupErr != nil {
+				a.auth = auth.NewService(loginLookupFailure{a.users, tc.lookupErr}, "test-secret")
+			}
+			var logs bytes.Buffer
+			previousOutput := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previousOutput) })
 
-	second := httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodPost, "/api/auth/social-login", strings.NewReader(`{"method":"GitHub","email":"octo@test.com","username":"ignored"}`))
-	request.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(second, request)
-	if second.Code != http.StatusOK {
-		t.Fatalf("repeat social login status = %d, body = %s", second.Code, second.Body.String())
+			body, err := json.Marshal(map[string]any{"account": tc.account, "password": tc.password, "remember": false})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
+			request.Header.Set("X-Request-ID", "untrusted-client-id")
+			if tc.browser {
+				request.Header.Set("Origin", "http://browser.test")
+			}
+			recorder := httptest.NewRecorder()
+			testHandler(a).ServeHTTP(recorder, request)
+			if recorder.Code != tc.status {
+				t.Fatalf("status=%d want=%d body=%s", recorder.Code, tc.status, recorder.Body.String())
+			}
+			requestID := recorder.Header().Get("X-Request-ID")
+			if requestID == "" || requestID == "untrusted-client-id" || !strings.Contains(logs.String(), "request_id="+requestID) {
+				t.Fatal("expected a server-generated request ID shared with the log")
+			}
+			if recorder.Header().Get("Access-Control-Expose-Headers") != "X-Request-ID" {
+				t.Fatal("browser must be able to read the request ID")
+			}
+			if !strings.Contains(logs.String(), "outcome="+tc.outcome) || !strings.Contains(logs.String(), `sqlstate="`+tc.sqlState+`"`) {
+				t.Fatalf("wrong diagnostic log: %s", logs.String())
+			}
+			var payload struct {
+				ErrorCode string         `json:"errorCode"`
+				RequestID string         `json:"requestId"`
+				Data      map[string]any `json:"data"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if tc.status != http.StatusOK && (payload.ErrorCode != tc.errorCode || payload.RequestID != requestID || payload.Data != nil) {
+				t.Fatalf("unexpected error contract: %s", recorder.Body.String())
+			}
+			if tc.status == http.StatusOK {
+				token, ok := payload.Data["token"].(string)
+				if !ok || token == "" || strings.Contains(logs.String(), token) {
+					t.Fatal("token must be returned only to the client, never logged")
+				}
+			}
+			for _, sensitive := range []string{password, tc.hash, "private-database-detail", tc.account} {
+				if strings.Contains(logs.String(), sensitive) || strings.Contains(recorder.Body.String(), sensitive) {
+					t.Fatal("credentials or internal details leaked")
+				}
+			}
+		})
 	}
-	var secondEnvelope struct {
-		Data struct {
-			Token string `json:"token"`
-			User  struct {
-				ID int64 `json:"id"`
-			} `json:"user"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(second.Body.Bytes(), &secondEnvelope); err != nil {
-		t.Fatal(err)
-	}
-	if secondEnvelope.Data.Token == "" || secondEnvelope.Data.User.ID != firstEnvelope.Data.User.ID {
-		t.Fatalf("expected social login to reuse user, first=%s second=%s", first.Body.String(), second.Body.String())
+}
+
+func TestMalformedLoginHasRequestID(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader("{"))
+	testHandler(testApp()).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || recorder.Header().Get("X-Request-ID") == "" ||
+		!strings.Contains(recorder.Body.String(), `"requestId":`) {
+		t.Fatalf("malformed login missing diagnostic ID: %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 

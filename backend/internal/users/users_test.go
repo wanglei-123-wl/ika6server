@@ -1,9 +1,25 @@
 package users
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
+
+func TestFindByEmailNormalizesAccountAndReportsMissingUser(t *testing.T) {
+	store := NewStore()
+	created, err := store.Create("member", "member@test.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, err := store.FindByEmail(" MEMBER@TEST.COM ")
+	if err != nil || found.ID != created.ID {
+		t.Fatalf("expected existing account: %v", err)
+	}
+	if _, err := store.FindByEmail("missing@test.com"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
 
 func TestDefaultRegistrationDoesNotGrantAdmin(t *testing.T) {
 	store := NewStore()

@@ -1,4 +1,4 @@
-import { request, setAuthToken } from './http';
+import { ApiError, request, setAuthToken } from './http';
 import { normalizeAuthResult, normalizeUser } from './normalizers';
 
 export async function login(payload) {
@@ -43,5 +43,9 @@ export async function logout() {
 }
 
 export async function getCurrentUser() {
-  return normalizeUser(await request('/api/auth/me'));
+  const result = await request('/api/auth/me');
+  if (!result?.user || result.user.id == null) {
+    throw new ApiError('服务器返回的用户信息不完整', { code: 'INVALID_RESPONSE' });
+  }
+  return normalizeUser(result.user);
 }

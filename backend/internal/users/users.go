@@ -14,6 +14,8 @@ const (
 	RoleAdmin Role = "admin"
 )
 
+var ErrNotFound = errors.New("user not found")
+
 type User struct {
 	ID               int64      `json:"id"`
 	Username         string     `json:"username"`
@@ -46,7 +48,7 @@ type AdminUser struct {
 
 type Repository interface {
 	Create(username, email, passwordHash string) (User, error)
-	FindByEmail(email string) (User, bool)
+	FindByEmail(email string) (User, error)
 	FindByUsername(username string) (User, bool)
 	FindByID(id int64) (User, bool)
 	Ban(id int64, until time.Time, reason string) (User, error)
@@ -112,17 +114,20 @@ func (s *Store) Create(username, email, passwordHash string) (User, error) {
 	return user, nil
 }
 
-func (s *Store) FindByEmail(email string) (User, bool) {
+func (s *Store) FindByEmail(email string) (User, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	id, ok := s.byEmail[strings.ToLower(strings.TrimSpace(email))]
 	if !ok {
-		return User{}, false
+		return User{}, ErrNotFound
 	}
 
 	user, ok := s.byID[id]
-	return user, ok
+	if !ok {
+		return User{}, ErrNotFound
+	}
+	return user, nil
 }
 
 func (s *Store) FindByUsername(username string) (User, bool) {

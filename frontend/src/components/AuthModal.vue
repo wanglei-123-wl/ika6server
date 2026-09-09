@@ -69,12 +69,13 @@ function applyServerError(error, mode) {
   const message = String(error?.message || '').toLowerCase();
   const nextErrors = {};
 
-  if (mode === 'login' && (
-    errorCode === 'INVALID_CREDENTIALS'
-    || error?.status === 401
-    || message.includes('invalid email or password')
-  )) {
-    nextErrors.loginPassword = '邮箱或密码错误';
+  if (mode === 'login') {
+    const loginMessage = errorCode === 'INVALID_CREDENTIALS'
+      ? '邮箱或密码错误'
+      : String(error?.message || '登录失败，请稍后重试');
+    nextErrors.login = error?.requestId
+      ? `${loginMessage}（请求编号：${error.requestId}）`
+      : loginMessage;
   } else if (mode === 'register') {
     if (errorCode === 'EMAIL_EXISTS' || message.includes('email already exists')) {
       nextErrors.registerAccount = '该邮箱已注册';
@@ -160,7 +161,7 @@ async function socialLogin(provider) {
     const result = await authStore.loginWithProvider(provider);
     emit('authenticated', result.user);
   } catch (error) {
-    emit('notice', '第三方登录失败，请稍后重试');
+    emit('notice', error?.errorCode === 'NOT_IMPLEMENTED' ? '第三方登录暂未开放' : '第三方登录失败，请稍后重试');
   } finally {
     loading.value = false;
   }
@@ -201,6 +202,7 @@ async function socialLogin(provider) {
           <button class="btn btn-primary auth-submit" type="submit" :disabled="loading">
             <span v-if="loading" class="auth-spinner"></span>{{ loading ? '登录中...' : '登录' }}
           </button>
+          <p v-if="errors.login" class="auth-error auth-login-error" role="alert">{{ errors.login }}</p>
           <div class="auth-divider">或使用以下方式登录</div>
           <div class="social-row">
             <button v-for="provider in ['GitHub', 'Google', '微信', 'QQ']" :key="provider" class="social-btn" type="button" @click="socialLogin(provider)">
@@ -249,3 +251,10 @@ async function socialLogin(provider) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.auth-login-error {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+</style>

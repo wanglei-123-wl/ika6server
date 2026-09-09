@@ -86,7 +86,6 @@ func (r *SQLRepository) EnsureUniqueAdmin(account, passwordHash string) error {
 		INSERT INTO users (username, email, password_hash, role)
 		VALUES ($1, $2, $3, 'admin')
 		ON CONFLICT (email) DO UPDATE SET
-			password_hash = EXCLUDED.password_hash,
 			role = 'admin'`,
 		adminUsername(account), account, passwordHash); err != nil {
 		return err
@@ -94,18 +93,18 @@ func (r *SQLRepository) EnsureUniqueAdmin(account, passwordHash string) error {
 	return tx.Commit()
 }
 
-func (r *SQLRepository) FindByEmail(email string) (User, bool) {
+func (r *SQLRepository) FindByEmail(email string) (User, error) {
 	user, err := scanUser(r.db.QueryRow(`
 		SELECT id, username, email, role, password_hash, created_at, banned_until, ban_reason,
 		       bio, location, avatar_url, avatar_stored_name, developer_engines
 		FROM users WHERE email = $1`, strings.ToLower(strings.TrimSpace(email))))
 	if errors.Is(err, sql.ErrNoRows) {
-		return User{}, false
+		return User{}, ErrNotFound
 	}
 	if err != nil {
-		return User{}, false
+		return User{}, err
 	}
-	return user, true
+	return user, nil
 }
 
 func (r *SQLRepository) FindByUsername(username string) (User, bool) {

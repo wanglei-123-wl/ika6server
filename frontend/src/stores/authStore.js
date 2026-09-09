@@ -48,15 +48,6 @@ async function runAuthAction(action, { persist = true } = {}) {
   }
 }
 
-function withAdminAccess(user) {
-  if (!user) return user;
-
-  return {
-    ...user,
-    adminAccess: user.role === 'admin',
-  };
-}
-
 export function useAuthStore() {
   const isAuthenticated = computed(() => Boolean(state.user));
   const isAdmin = computed(() => state.user?.role === 'admin' && state.user?.adminAccess === true);
@@ -74,7 +65,7 @@ export function useAuthStore() {
 
     try {
       const user = await getCurrentUser();
-      state.user = withAdminAccess(user);
+      state.user = user;
       cacheUser(state.user, { persist: tokenPersistence !== 'session' });
     } catch {
       state.user = null;
@@ -85,10 +76,7 @@ export function useAuthStore() {
   }
 
   async function loginWithPassword(payload) {
-    const result = await runAuthAction(() => login(payload), { persist: payload.remember !== false });
-    state.user = withAdminAccess(result.user || result);
-    cacheUser(state.user, { persist: payload.remember !== false });
-    return { ...result, user: state.user };
+    return runAuthAction(() => login(payload), { persist: payload.remember !== false });
   }
 
   async function registerAccount(payload) {

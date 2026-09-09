@@ -28,7 +28,7 @@ go run .\cmd\api
 IKA6_ADDR=0.0.0.0:8080
 IKA6_DATABASE_URL=postgres://user:password@localhost:5432/ika6
 IKA6_MIGRATIONS_DIR=F:\ika6server\backend\migrations
-IKA6_ADMIN_ACCOUNT=yaochenAi.18700021044.com@#$%
+IKA6_ADMIN_ACCOUNT=admin@example.com
 IKA6_ADMIN_PASSWORD_HASH=replace-with-output-of-go-run-cmd-hash-password
 IKA6_UPLOAD_DIR=F:\ika6server\storage\uploads
 IKA6_TEMP_DIR=F:\ika6server\storage\tmp
@@ -53,11 +53,46 @@ go run .\cmd\migrate
 
 The API applies pending migrations during startup. `IKA6_DATABASE_URL`, `IKA6_TOKEN_SECRET`, `IKA6_ADMIN_ACCOUNT`, and `IKA6_ADMIN_PASSWORD_HASH` are required for API startup; the backend no longer falls back to in-memory storage in `cmd/api`.
 
+`IKA6_ADMIN_PASSWORD_HASH` initializes a new administrator only. If the configured
+account already exists, startup preserves its stored password hash. Changing the
+environment variable and restarting is no longer a password-reset operation.
+
 Generate the administrator password hash with:
 
 ```powershell
 go run .\cmd\hash-password your-password
 ```
+
+## Login Diagnostics
+
+Password login responses include an `X-Request-ID` header; failures also include
+`requestId` in the JSON body and the login form displays it. Match this ID to the
+`auth_login` line in the API terminal. Logs contain no account, password, hash,
+token, or raw database error.
+
+- `success`: password verification succeeded.
+- `account_not_found` / `password_mismatch`: public response remains the same
+  generic `401 INVALID_CREDENTIALS`.
+- `lookup_error` / `invalid_password_hash`: `503 AUTH_SERVICE_UNAVAILABLE`;
+  investigate the server/database rather than resetting the user's password.
+- `invalid_request`: the request body could not be decoded.
+
+`configured_admin` indicates whether the submitted account matches the configured
+administrator. `browser_request` indicates an Origin header was present, not a
+verified client identity. A database SQLSTATE is logged only when available.
+
+`POST /api/auth/social-login` returns `501 NOT_IMPLEMENTED` until actual OAuth
+identity verification is implemented. A supplied email/provider must not issue a
+login token.
+
+The isolated auth repository test uses temporary tables and `search_path=pg_temp`
+on every connection. It runs only when `IKA6_AUTH_TEST_DATABASE_URL` is set:
+
+```powershell
+go test .\internal\users -run TestPostgresAdminBootstrapAndLoginLookup -count=1
+```
+
+## Migration Tests
 
 The PostgreSQL integration test is skipped when `IKA6_DATABASE_URL` is absent:
 

@@ -4,13 +4,14 @@ const TOKEN_KEY = 'ika6_auth_token';
 export const AUTH_EXPIRED_EVENT = 'ika6:auth-expired';
 
 export class ApiError extends Error {
-  constructor(message, { status = 0, code = -1, errorCode = '', data = null } = {}) {
+  constructor(message, { status = 0, code = -1, errorCode = '', data = null, requestId = '' } = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.errorCode = errorCode;
     this.data = data;
+    this.requestId = requestId;
   }
 }
 
@@ -56,7 +57,7 @@ export function resolveApiAssetUrl(path) {
   return new URL(path, API_BASE_URL || window.location.origin).toString();
 }
 
-function normalizePayload(payload, { notifyExpired = true, status = 0 } = {}) {
+function normalizePayload(payload, { notifyExpired = true, status = 0, requestId = '' } = {}) {
   if (payload && typeof payload === 'object' && 'code' in payload) {
     if (payload.code !== 0) {
       if (payload.code === 401 && notifyExpired) {
@@ -69,6 +70,7 @@ function normalizePayload(payload, { notifyExpired = true, status = 0 } = {}) {
         code: payload.code,
         errorCode: payload.errorCode,
         data: payload.data,
+        requestId: payload.requestId || requestId,
       });
     }
 
@@ -82,6 +84,7 @@ function normalizePayload(payload, { notifyExpired = true, status = 0 } = {}) {
         code: payload.code,
         errorCode: payload.errorCode,
         data: payload.data,
+        requestId: payload.requestId || requestId,
       });
     }
 
@@ -128,13 +131,14 @@ export async function request(path, options = {}) {
     window.clearTimeout(timer);
   }
 
+  const requestId = response.headers.get('X-Request-ID') || '';
   const text = await response.text();
   let payload = null;
 
   try {
     payload = text ? JSON.parse(text) : null;
   } catch {
-    throw new ApiError('服务器返回的数据格式不正确', { status: response.status });
+    throw new ApiError('服务器返回的数据格式不正确', { status: response.status, requestId });
   }
 
   if (!response.ok) {
@@ -147,8 +151,9 @@ export async function request(path, options = {}) {
       code: payload?.code,
       errorCode: payload?.errorCode,
       data: payload?.data,
+      requestId: payload?.requestId || requestId,
     });
   }
 
-  return normalizePayload(payload, { notifyExpired: auth, status: response.status });
+  return normalizePayload(payload, { notifyExpired: auth, status: response.status, requestId });
 }

@@ -52,6 +52,7 @@ export function normalizeUser(raw = {}) {
     avatar: pick(raw, ['avatar', 'avatarUrl', 'avatar_url'], ''),
     level: pick(raw, ['level', 'rank'], 'lv1'),
     role: pick(raw, ['role', 'userRole', 'user_role'], 'user'),
+    adminAccess: raw.adminAccess === true,
     method: pick(raw, ['method', 'loginMethod', 'login_method'], 'password'),
   };
 }
