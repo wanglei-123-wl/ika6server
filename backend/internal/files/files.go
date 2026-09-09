@@ -174,6 +174,19 @@ func (s *Store) FindByKey(ownerID int64, kind string) (File, string, bool) {
 	return file, filepath.Join(s.uploadDir, file.StoredName), true
 }
 
+func (s *Store) RemoveKey(ownerID int64, kind string) {
+	s.mu.Lock()
+	key := uploadKey(ownerID, kind)
+	file, ok := s.byKey[key]
+	if ok {
+		delete(s.byKey, key)
+	}
+	s.mu.Unlock()
+	if ok {
+		_ = os.Remove(filepath.Join(s.uploadDir, file.StoredName))
+	}
+}
+
 func (s *Store) RemoveOwner(ownerID int64) {
 	s.mu.Lock()
 	var storedNames []string
@@ -205,20 +218,44 @@ func validateUpload(kind string, header *multipart.FileHeader) error {
 	if header.Size <= 0 {
 		return errors.New("file must not be empty")
 	}
-	if kind == "cover" {
-		if header.Size > 10<<20 {
-			return errors.New("cover file exceeds 10 MB limit")
+	if kind == "cover" || kind == "avatar" {
+		limit := int64(10 << 20)
+		label := "cover"
+		if kind == "cover" {
+			limit = 8 << 20
+		}
+		if kind == "avatar" {
+			limit = 5 << 20
+			label = "avatar"
+		}
+		if header.Size > limit {
+			return errors.New(label + " file exceeds size limit")
 		}
 		if !allowedExtension(header.Filename, ".png", ".jpg", ".jpeg", ".webp") {
-			return errors.New("cover file type is not allowed")
+			return errors.New(label + " file type is not allowed")
 		}
 		return nil
 	}
-	if header.Size > 2<<30 {
-		return errors.New("package file exceeds 2 GB limit")
+	if kind == "build" {
+		if header.Size > 500<<20 {
+			return errors.New("build file exceeds 500 MB limit")
+		}
+		if !allowedExtension(header.Filename, ".zip") {
+			return errors.New("build file type is not allowed; a .zip file is required")
+		}
+		return nil
+	}
+	limit := int64(300 << 20)
+	label := "source"
+	if kind == "forum" || kind == "file" {
+		limit = 2 << 30
+		label = "package"
+	}
+	if header.Size > limit {
+		return errors.New(label + " file exceeds size limit")
 	}
 	if !allowedExtension(header.Filename, ".zip", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".rar") {
-		return errors.New("package file type is not allowed")
+		return errors.New(label + " file type is not allowed")
 	}
 	return nil
 }

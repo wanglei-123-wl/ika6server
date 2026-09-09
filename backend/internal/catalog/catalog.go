@@ -10,31 +10,33 @@ import (
 )
 
 type Game struct {
-	ID        int64  `json:"id"`
-	Title     string `json:"title"`
-	Summary   string `json:"summary"`
-	Glyph     string `json:"glyph"`
-	Cover     int    `json:"cover"`
-	CoverURL  string `json:"coverUrl"`
-	Badge     string `json:"badge"`
-	Author    string `json:"author"`
-	Engine    string `json:"engine"`
-	Size      string `json:"size"`
-	Plays     string `json:"plays"`
-	Likes     int64  `json:"likes"`
-	Liked     bool   `json:"liked"`
-	HasSource bool   `json:"hasSource"`
-	Genre     string `json:"genre"`
-	License   string `json:"license"`
-	Status    string `json:"status"`
-	PlayURL   string `json:"playUrl"`
-	SourceURL string `json:"sourceUrl"`
-	CreatedAt string `json:"createdAt"`
+	ID           int64  `json:"id"`
+	Title        string `json:"title"`
+	Summary      string `json:"summary"`
+	Glyph        string `json:"glyph"`
+	Cover        int    `json:"cover"`
+	CoverURL     string `json:"coverUrl"`
+	Badge        string `json:"badge"`
+	Author       string `json:"author"`
+	Engine       string `json:"engine"`
+	Size         string `json:"size"`
+	Plays        string `json:"plays"`
+	Likes        int64  `json:"likes"`
+	Liked        bool   `json:"liked"`
+	HasSource    bool   `json:"hasSource"`
+	Genre        string `json:"genre"`
+	License      string `json:"license"`
+	Status       string `json:"status"`
+	PlayURL      string `json:"playUrl"`
+	SourceURL    string `json:"sourceUrl"`
+	CreatedAt    string `json:"createdAt"`
+	RejectReason string `json:"rejectReason,omitempty"`
 }
 
 type DeveloperGame struct {
 	ID             int64  `json:"id"`
 	Title          string `json:"title"`
+	Author         string `json:"author,omitempty"`
 	Glyph          string `json:"glyph"`
 	Cover          int    `json:"cover"`
 	CoverURL       string `json:"coverUrl"`
@@ -52,6 +54,39 @@ type DeveloperGame struct {
 	UpdatedAt      string `json:"updatedAt"`
 	PlayURL        string `json:"playUrl"`
 	SourceURL      string `json:"sourceUrl"`
+}
+
+type GameUpdate struct {
+	Title       *string `json:"title"`
+	Summary     *string `json:"summary"`
+	Description *string `json:"description"`
+	Engine      *string `json:"engine"`
+	Genre       *string `json:"genre"`
+	License     *string `json:"license"`
+	CoverURL    *string `json:"coverUrl"`
+}
+
+type AdminForumPost struct {
+	ID         int64  `json:"id"`
+	Title      string `json:"title"`
+	Author     string `json:"author"`
+	Content    string `json:"content"`
+	Status     string `json:"status"`
+	CreatedAt  string `json:"createdAt"`
+	ReplyCount int64  `json:"replyCount"`
+	Views      int64  `json:"views"`
+}
+
+type ForumAttachment struct {
+	ID           int64  `json:"id"`
+	PostID       int64  `json:"postId"`
+	UploaderID   int64  `json:"uploaderId,omitempty"`
+	OriginalName string `json:"originalName"`
+	Size         int64  `json:"size"`
+	DownloadURL  string `json:"downloadUrl"`
+	CreatedAt    string `json:"createdAt"`
+	StoredName   string `json:"-"`
+	SHA256       string `json:"-"`
 }
 
 type DeveloperStats struct {
@@ -145,6 +180,8 @@ type Store struct {
 	gameLikes   map[int64]map[int64]bool
 	postLikes   map[int64]map[int64]bool
 	replyLikes  map[int64]map[int64]bool
+	forumFiles  map[int64][]ForumAttachment
+	nextFileID  int64
 }
 
 func NewStore() *Store {
@@ -164,6 +201,8 @@ func NewStore() *Store {
 		gameLikes:  make(map[int64]map[int64]bool),
 		postLikes:  make(map[int64]map[int64]bool),
 		replyLikes: make(map[int64]map[int64]bool),
+		forumFiles: make(map[int64][]ForumAttachment),
+		nextFileID: 1,
 	}
 }
 
@@ -271,6 +310,98 @@ func (s *Store) DeveloperStats(username string) DeveloperStats {
 		stats.TotalDownloads += item.Downloads
 	}
 	return stats
+}
+
+func (s *Store) UpdateDeveloperGame(username string, id int64, update GameUpdate) (DeveloperGame, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	author := "@" + strings.TrimSpace(username)
+	for index := range s.games {
+		item := &s.games[index]
+		if item.ID != id {
+			continue
+		}
+		if item.Author != author {
+			return DeveloperGame{}, errNotGameOwner
+		}
+		if item.Status != "draft" && item.Status != "rejected" && item.Status != "offline" {
+			return DeveloperGame{}, errInvalidGameState
+		}
+		if update.Title != nil {
+			item.Title = strings.TrimSpace(*update.Title)
+			if item.Title == "" {
+				return DeveloperGame{}, errors.New("title is required")
+			}
+		}
+		if update.Summary != nil {
+			item.Summary = strings.TrimSpace(*update.Summary)
+		}
+		if update.Engine != nil {
+			item.Engine = strings.TrimSpace(*update.Engine)
+		}
+		if update.Genre != nil {
+			item.Genre = strings.TrimSpace(*update.Genre)
+		}
+		if update.License != nil {
+			item.License = strings.TrimSpace(*update.License)
+		}
+		if update.CoverURL != nil {
+			item.CoverURL = strings.TrimSpace(*update.CoverURL)
+		}
+		return developerGameFromGame(*item, 0), nil
+	}
+	return DeveloperGame{}, errors.New("game not found")
+}
+
+func (s *Store) AdminForumPosts(status string) ([]AdminForumPost, int, error) {
+	status = normalizeForumPostStatus(status)
+	if status == "" {
+		return nil, 0, errors.New("invalid post status")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]AdminForumPost, 0)
+	for _, item := range s.posts {
+		if status != "all" && item.Status != status {
+			continue
+		}
+		items = append(items, AdminForumPost{
+			ID: item.ID, Title: item.Title, Author: item.Name, Content: item.Excerpt,
+			Status: item.Status, CreatedAt: item.Time, ReplyCount: parseCount(item.Replies), Views: parseCount(item.Views),
+		})
+	}
+	return items, len(items), nil
+}
+
+func (s *Store) AddForumAttachment(postID, uploaderID int64, originalName, storedName string, size int64, sha256 string) ForumAttachment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item := ForumAttachment{
+		ID: s.nextFileID, PostID: postID, UploaderID: uploaderID, OriginalName: originalName,
+		Size: size, StoredName: storedName, SHA256: sha256,
+		DownloadURL: "/api/forum/posts/" + IDString(postID) + "/files/" + IDString(s.nextFileID),
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	}
+	s.nextFileID++
+	s.forumFiles[postID] = append(s.forumFiles[postID], item)
+	return item
+}
+
+func (s *Store) ForumAttachments(postID int64) []ForumAttachment {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]ForumAttachment(nil), s.forumFiles[postID]...)
+}
+
+func (s *Store) ForumAttachment(postID, fileID int64) (ForumAttachment, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.forumFiles[postID] {
+		if item.ID == fileID {
+			return item, true
+		}
+	}
+	return ForumAttachment{}, false
 }
 
 func (s *Store) ResubmitDeveloperGame(username string, id int64) (DeveloperGame, error) {
@@ -443,10 +574,14 @@ func (s *Store) AddPost(author, title, cat, content string, tags []string, barID
 	return item, nil
 }
 
-func (s *Store) ReviewGame(id int64, status string) (Game, error) {
+func (s *Store) ReviewGame(id int64, status string, reasons ...string) (Game, error) {
 	status = normalizeGameReviewStatus(status)
 	if status == "" {
 		return Game{}, errors.New("status must be approved, rejected, published or offline")
+	}
+	reason := ""
+	if len(reasons) > 0 {
+		reason = strings.TrimSpace(reasons[0])
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -456,6 +591,11 @@ func (s *Store) ReviewGame(id int64, status string) (Game, error) {
 				status = "published"
 			}
 			s.games[index].Status = status
+			if status == "rejected" {
+				s.games[index].RejectReason = reason
+			} else {
+				s.games[index].RejectReason = ""
+			}
 			return s.games[index], nil
 		}
 	}
@@ -485,6 +625,20 @@ func normalizeGameReviewStatus(status string) string {
 	status = strings.ToLower(strings.TrimSpace(status))
 	switch status {
 	case "approved", "published", "rejected", "offline":
+		return status
+	default:
+		return ""
+	}
+}
+
+func normalizeForumPostStatus(status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	switch status {
+	case "", "all":
+		return "all"
+	case "approved":
+		return "published"
+	case "pending", "published", "rejected", "hidden":
 		return status
 	default:
 		return ""
@@ -830,7 +984,7 @@ func ErrInvalidGameState() error {
 }
 
 func developerGameFromGame(item Game, downloads int64) DeveloperGame {
-	return DeveloperGame{
+	result := DeveloperGame{
 		ID:             item.ID,
 		Title:          item.Title,
 		Glyph:          defaultString(item.Glyph, "◆"),
@@ -845,11 +999,17 @@ func developerGameFromGame(item Game, downloads int64) DeveloperGame {
 		Likes:          item.Likes,
 		ReviewProgress: reviewProgress(item.Status),
 		ReviewMessage:  reviewMessage(item.Status),
+		RejectReason:   item.RejectReason,
 		CreatedAt:      item.CreatedAt,
 		UpdatedAt:      item.CreatedAt,
 		PlayURL:        item.PlayURL,
 		SourceURL:      item.SourceURL,
 	}
+	if item.Status != "published" {
+		result.PlayURL = ""
+		result.SourceURL = ""
+	}
+	return result
 }
 
 func reviewProgress(status string) int {

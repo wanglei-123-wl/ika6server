@@ -1,9 +1,10 @@
 import { computed, reactive } from 'vue';
 import { getCurrentUser, login, logout, register, socialLogin } from '../api/auth';
-import { getAuthToken, getAuthTokenPersistence, isMockEnabled } from '../api/http';
+import { getAuthToken, getAuthTokenPersistence } from '../api/http';
 
 const USER_CACHE_KEY = 'ika6_current_user';
 const LEGACY_USER_CACHE_KEY = 'pf_user';
+const PLATFORM_ADMIN_ACCOUNT = 'yaochenAi.18700021044.com@#$%';
 
 const state = reactive({
   user: null,
@@ -48,9 +49,22 @@ async function runAuthAction(action, { persist = true } = {}) {
   }
 }
 
+function normalizeAccount(value) {
+  return String(value || '').trim();
+}
+
+function withAdminAccess(user, account = '') {
+  if (!user) return user;
+
+  return {
+    ...user,
+    adminAccess: user.role === 'admin' && normalizeAccount(account) === PLATFORM_ADMIN_ACCOUNT,
+  };
+}
+
 export function useAuthStore() {
   const isAuthenticated = computed(() => Boolean(state.user));
-  const isAdmin = computed(() => state.user?.role === 'admin');
+  const isAdmin = computed(() => state.user?.role === 'admin' && state.user?.adminAccess === true);
 
   async function bootstrap() {
     if (!getAuthToken()) {
@@ -63,15 +77,11 @@ export function useAuthStore() {
     const tokenPersistence = getAuthTokenPersistence();
     state.user = readCachedUser();
 
-    if (isMockEnabled() && state.user) {
-      state.initialized = true;
-      return;
-    }
-
     try {
       const user = await getCurrentUser();
-      state.user = user;
-      cacheUser(user, { persist: tokenPersistence !== 'session' });
+      state.user = withAdminAccess(user, state.user?.adminAccount);
+      if (state.user?.adminAccess) state.user.adminAccount = state.user.adminAccount || PLATFORM_ADMIN_ACCOUNT;
+      cacheUser(state.user, { persist: tokenPersistence !== 'session' });
     } catch {
       state.user = null;
       cacheUser(null);
@@ -81,7 +91,11 @@ export function useAuthStore() {
   }
 
   async function loginWithPassword(payload) {
-    return runAuthAction(() => login(payload), { persist: payload.remember !== false });
+    const result = await runAuthAction(() => login(payload), { persist: payload.remember !== false });
+    state.user = withAdminAccess(result.user || result, payload.account);
+    if (state.user?.adminAccess) state.user.adminAccount = normalizeAccount(payload.account);
+    cacheUser(state.user, { persist: payload.remember !== false });
+    return { ...result, user: state.user };
   }
 
   async function registerAccount(payload) {

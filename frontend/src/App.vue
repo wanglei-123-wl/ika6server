@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import CreatePostModal from './components/CreatePostModal.vue';
 import AuthModal from './components/AuthModal.vue';
 import UploadGameModal from './components/UploadGameModal.vue';
-import { API_FALLBACK_EVENT, AUTH_EXPIRED_EVENT, createForumPost, downloadRepo, getDevDocs, getForumBars, getForumPosts, getGameList, getGameSource, getHomeData, getRepoList, likeForumPost, searchSite, trackGamePlay, uploadGame } from './api';
+import { AUTH_EXPIRED_EVENT, createForumPost, downloadRepo, getDevDocs, getForumBars, getForumPosts, getGameList, getGameSource, getHomeData, getRepoList, likeForumPost, searchSite, trackGamePlay, uploadGame } from './api';
 import AdminPage from './pages/AdminPage.vue';
 import DevPage from './pages/DevPage.vue';
 import ForumPage from './pages/ForumPage.vue';
@@ -30,6 +30,7 @@ const activeBar = ref({ icon: '◆', name: '独立游戏吧', desc: '正在加�
 const activeDocKey = ref('quickstart');
 const uploadOpen = ref(false);
 const uploadSubmitting = ref(false);
+const uploadProgress = ref({ percent: 0, loaded: 0, total: 0, stage: '' });
 const postModalOpen = ref(false);
 const postSubmitting = ref(false);
 const authOpen = ref(false);
@@ -79,6 +80,11 @@ const forumPosts = computed(() => (
 function route() {
   currentPath.value = window.location.hash || '#/';
   const key = currentPath.value.replace('#/', '') || 'home';
+  if (key === 'admin' && !isAdmin.value) {
+    window.location.hash = '#/';
+    activeView.value = 'home';
+    return;
+  }
   activeView.value = routes.some((item) => item.key === key) ? key : 'notFound';
 }
 
@@ -198,9 +204,12 @@ async function submitUpload(payload) {
   }
 
   uploadSubmitting.value = true;
+  uploadProgress.value = { percent: 0, loaded: 0, total: 0, stage: '准备上传...' };
 
   try {
-    await uploadGame(payload);
+    await uploadGame(payload, (progress) => {
+      uploadProgress.value = { ...uploadProgress.value, ...progress };
+    });
     uploadOpen.value = false;
     developerRefreshKey.value += 1;
     showToast('游戏已提交，等待审核');
@@ -215,6 +224,7 @@ async function submitUpload(payload) {
     if (error?.status === 401) openAuth();
   } finally {
     uploadSubmitting.value = false;
+    uploadProgress.value = { percent: 0, loaded: 0, total: 0, stage: '' };
   }
 }
 
@@ -225,6 +235,7 @@ function openAuth() {
 
 function handleAuthenticated(user) {
   authOpen.value = false;
+  if (window.location.hash === '#/admin' && !isAdmin.value) window.location.hash = '#/';
   showToast(user.method === 'register' ? `注册成功，欢迎加入 ${user.name}` : `欢迎回来，${user.name}`);
 }
 
@@ -246,10 +257,6 @@ function handleAuthExpired() {
   authStore.expireSession();
   accountMenuOpen.value = false;
   showToast('登录已过期，请重新登录');
-}
-
-function handleApiFallback() {
-  showToast('后端服务不可用，请检查接口配置');
 }
 
 function accountAction(label) {
@@ -411,11 +418,10 @@ function onKeydown(event) {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   theme.value = window.localStorage.getItem('pixel-forge-theme') || 'dark';
   window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
-  window.addEventListener(API_FALLBACK_EVENT, handleApiFallback);
-  authStore.bootstrap();
+  await authStore.bootstrap();
   loadClientData();
   route();
   window.addEventListener('hashchange', route);
@@ -426,7 +432,6 @@ onMounted(() => {
 onUnmounted(() => {
   window.clearTimeout(searchTimer);
   window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
-  window.removeEventListener(API_FALLBACK_EVENT, handleApiFallback);
   window.removeEventListener('hashchange', route);
   window.removeEventListener('keydown', onKeydown);
   window.removeEventListener('click', closeAccountMenu);
@@ -452,6 +457,13 @@ watch(activeForumCat, async (cat) => {
     postList.value = result.items || [];
   } catch {
     showToast('帖子分类加载失败');
+  }
+});
+
+watch(isAdmin, (allowed) => {
+  if (!allowed && activeView.value === 'admin') {
+    window.location.hash = '#/';
+    activeView.value = 'home';
   }
 });
 </script>
@@ -611,7 +623,7 @@ watch(activeForumCat, async (cat) => {
       </div>
     </footer>
 
-    <UploadGameModal :show="uploadOpen" :submitting="uploadSubmitting" @close="uploadOpen = false" @submit="submitUpload" />
+    <UploadGameModal :show="uploadOpen" :submitting="uploadSubmitting" :progress="uploadProgress" @close="uploadOpen = false" @submit="submitUpload" />
 
     <CreatePostModal :show="postModalOpen" :submitting="postSubmitting" @close="postModalOpen = false" @submit="submitPost" />
 
@@ -622,11 +634,10 @@ watch(activeForumCat, async (cat) => {
         <div class="player-bar"><div class="dots"><span></span><span></span><span></span></div><div class="player-title">{{ currentGame.title }}</div><button class="player-close" @click="playerOpen = false">×</button></div>
         <div class="player-canvas">
           <iframe v-if="currentPlayUrl" class="player-frame" :src="currentPlayUrl" :title="currentGame.title" allowfullscreen></iframe>
-          <div v-else class="player-demo">
+          <div v-else class="player-unavailable">
             <div class="logo">{{ currentGame.glyph }}</div>
-            <h2>{{ currentGame.title }}</h2>
-            <p>WebGL 2.0 · 平均帧率 60 FPS · 体积 {{ currentGame.size }}</p>
-            <div class="keys"><span>WASD 移动</span><span>SPACE 跳跃</span><span>SHIFT 冲刺</span><span>ESC 退出</span></div>
+            <h2>暂无在线试玩入口</h2>
+            <p>服务器未返回可用的试玩地址，请稍后再试。</p>
           </div>
         </div>
       </div>

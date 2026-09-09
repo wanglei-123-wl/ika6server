@@ -27,6 +27,7 @@ import (
 	"github.com/wanglei-123-wl/ika6server/backend/internal/files"
 	playdeploy "github.com/wanglei-123-wl/ika6server/backend/internal/play"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/posts"
+	"github.com/wanglei-123-wl/ika6server/backend/internal/reports"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/reputation"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/sandbox"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/scanner"
@@ -46,6 +47,7 @@ type app struct {
 	auditLog    audit.Logger
 	blocklist   blocklist.Repository
 	reputation  reputation.Repository
+	reports     reports.Repository
 	catalog     *catalog.Store
 	sqlCatalog  *catalog.SQLRepository
 	reviewUrges map[string]time.Time
@@ -71,6 +73,12 @@ func main() {
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
 		log.Fatal("IKA6_DATABASE_URL is required; backend will not start without PostgreSQL persistence")
 	}
+	if strings.TrimSpace(cfg.AdminAccount) == "" || strings.TrimSpace(cfg.AdminPasswordHash) == "" {
+		log.Fatal("IKA6_ADMIN_ACCOUNT and IKA6_ADMIN_PASSWORD_HASH are required for the unique administrator account")
+	}
+	if strings.TrimSpace(os.Getenv("IKA6_TOKEN_SECRET")) == "" {
+		log.Fatal("IKA6_TOKEN_SECRET is required; set a production-grade token secret")
+	}
 
 	db, err := database.Open(cfg.DatabaseURL)
 	if err != nil {
@@ -81,6 +89,7 @@ func main() {
 	var tokenRevocations auth.TokenRevocationStore
 	var blocklistRepository blocklist.Repository
 	var reputationRepository reputation.Repository
+	var reportRepository reports.Repository
 	var auditLogger audit.Logger
 	pingContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	err = db.Ping(pingContext)
@@ -95,8 +104,11 @@ func main() {
 	if err := database.ApplyMigrations(context.Background(), db.SQL(), migrations); err != nil {
 		log.Fatal(err)
 	}
-	userRepository, err := users.NewSQLRepository(db.SQL(), cfg.BootstrapAdminAccount)
+	userRepository, err := users.NewSQLRepository(db.SQL(), cfg.AdminAccount)
 	if err != nil {
+		log.Fatal(err)
+	}
+	if err := userRepository.EnsureUniqueAdmin(cfg.AdminAccount, cfg.AdminPasswordHash); err != nil {
 		log.Fatal(err)
 	}
 	sqlCatalog, err = catalog.NewSQLRepository(db.SQL())
@@ -116,6 +128,10 @@ func main() {
 		log.Fatal(err)
 	}
 	auditLogger, err = audit.NewSQLLogger(db.SQL())
+	if err != nil {
+		log.Fatal(err)
+	}
+	reportRepository, err = reports.NewSQLRepository(db.SQL())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -139,6 +155,7 @@ func main() {
 		auditLog:    auditLogger,
 		blocklist:   blocklistRepository,
 		reputation:  reputationRepository,
+		reports:     reportRepository,
 		catalog:     catalogStore,
 		sqlCatalog:  sqlCatalog,
 		reviewUrges: make(map[string]time.Time),
@@ -166,6 +183,7 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/me", a.handleMe)
 	mux.HandleFunc("POST /api/auth/social-login", a.handleSocialLogin)
 	mux.HandleFunc("GET /api/users/me", a.handleMe)
+	mux.HandleFunc("GET /api/users/{id}/avatar", a.handleUserAvatar)
 	mux.HandleFunc("GET /api/home", a.handleHome)
 	mux.HandleFunc("GET /api/games", a.handleGames)
 	mux.HandleFunc("POST /api/games", a.handleCreateGame)
@@ -179,6 +197,10 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/forum/posts", a.handleForumPosts)
 	mux.HandleFunc("GET /api/forum/posts/{id}", a.handleForumPost)
 	mux.HandleFunc("POST /api/forum/posts", a.handleCreateForumPost)
+	mux.HandleFunc("POST /api/forum/posts/{id}/files", a.handleUploadForumFile)
+	mux.HandleFunc("GET /api/forum/posts/{id}/files", a.handleListForumFiles)
+	mux.HandleFunc("GET /api/forum/posts/{id}/files/{fileId}", a.handleDownloadForumFile)
+	mux.HandleFunc("POST /api/forum/reports", a.handleCreateReport)
 	mux.HandleFunc("POST /api/forum/posts/{id}/like", a.handleLikeForumPost)
 	mux.HandleFunc("GET /api/forum/posts/{postId}/comments", a.handleComments)
 	mux.HandleFunc("GET /api/forum/comments/{commentId}/replies", a.handleCommentReplies)
@@ -198,6 +220,9 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/developer/games/{id}/resubmit", a.handleDeveloperResubmitGame)
 	mux.HandleFunc("POST /api/developer/games/{id}/urge-review", a.handleDeveloperUrgeReview)
 	mux.HandleFunc("DELETE /api/developer/games/{id}", a.handleDeveloperDeleteGame)
+	mux.HandleFunc("PATCH /api/developer/games/{id}", a.handleDeveloperUpdateGame)
+	mux.HandleFunc("PUT /api/developer/me", a.handleDeveloperProfileUpdate)
+	mux.HandleFunc("POST /api/developer/avatar", a.handleDeveloperAvatar)
 	mux.HandleFunc("PUT /api/admin/dev-docs", a.handleUpdateDevDocs)
 	mux.HandleFunc("GET /api/users/me/reputation", a.handleMyReputation)
 	mux.HandleFunc("GET /api/categories", a.handleCategories)
@@ -205,6 +230,7 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/posts", a.handleCreatePost)
 	mux.HandleFunc("GET /api/search", a.handleSearch)
 	mux.HandleFunc("POST /api/posts/{id}/files", a.handleUploadFile)
+	mux.HandleFunc("POST /api/reports", a.handleCreateReport)
 	mux.HandleFunc("GET /api/posts/{id}/download", a.handleDownloadFile)
 	mux.HandleFunc("POST /api/admin/posts/{id}/approve", a.handleApprovePost)
 	mux.HandleFunc("POST /api/admin/posts/{id}/reject", a.handleRejectPost)
@@ -213,9 +239,15 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/reputation", a.handleListReputation)
 	mux.HandleFunc("GET /api/admin/audit-logs", a.handleListAuditLogs)
 	mux.HandleFunc("GET /api/admin/dashboard", a.handleAdminDashboard)
+	mux.HandleFunc("GET /api/admin/games", a.handleAdminGames)
+	mux.HandleFunc("GET /api/admin/posts", a.handleAdminPosts)
 	mux.HandleFunc("POST /api/admin/games/{id}/review", a.handleReviewGame)
 	mux.HandleFunc("POST /api/admin/posts/{id}/review", a.handleReviewForumPost)
+	mux.HandleFunc("GET /api/admin/users", a.handleAdminUsers)
 	mux.HandleFunc("POST /api/admin/users/{id}/ban", a.handleBanUser)
+	mux.HandleFunc("POST /api/admin/users/{id}/unban", a.handleUnbanUser)
+	mux.HandleFunc("GET /api/admin/reports", a.handleAdminReports)
+	mux.HandleFunc("POST /api/admin/reports/{id}/resolve", a.handleResolveAdminReport)
 }
 
 func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -276,7 +308,7 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	a.reputation.Add(user.ID, reputation.EventRegister, 5, "registered account")
 
-	writeAPI(w, http.StatusCreated, map[string]any{"user": publicUser(user, "register"), "token": token})
+	writeAPI(w, http.StatusCreated, map[string]any{"user": a.publicUser(user, "register"), "token": token})
 }
 
 func (a *app) handleMyReputation(w http.ResponseWriter, r *http.Request) {
@@ -312,7 +344,7 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAPI(w, http.StatusOK, map[string]any{"user": publicUser(user, "password"), "token": token})
+	writeAPI(w, http.StatusOK, map[string]any{"user": a.publicUser(user, "password"), "token": token})
 }
 
 func (a *app) handleMe(w http.ResponseWriter, r *http.Request) {
@@ -321,7 +353,7 @@ func (a *app) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAPI(w, http.StatusOK, map[string]any{"user": publicUser(user, "password")})
+	writeAPI(w, http.StatusOK, map[string]any{"user": a.publicUser(user, "password")})
 }
 
 func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -392,7 +424,7 @@ func (a *app) handleSocialLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token := a.auth.SignToken(user.ID)
-	writeAPI(w, http.StatusOK, map[string]any{"user": publicUser(user, provider), "token": token})
+	writeAPI(w, http.StatusOK, map[string]any{"user": a.publicUser(user, provider), "token": token})
 }
 
 func (a *app) handleHome(w http.ResponseWriter, r *http.Request) {
@@ -457,7 +489,93 @@ func (a *app) handleDeveloperMe(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeAPI(w, http.StatusOK, developerProfile(user))
+	writeAPI(w, http.StatusOK, a.developerProfile(r.Context(), user))
+}
+
+func (a *app) handleDeveloperProfileUpdate(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		Bio      string   `json:"bio"`
+		Location string   `json:"location"`
+		Engines  []string `json:"engines"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	updated, err := a.users.UpdateProfile(user.ID, input.Bio, input.Location, input.Engines)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update developer profile")
+		return
+	}
+	writeAPI(w, http.StatusOK, a.developerProfile(r.Context(), updated))
+}
+
+func (a *app) handleDeveloperAvatar(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	if a.files == nil {
+		writeError(w, http.StatusServiceUnavailable, "avatar storage is not configured")
+		return
+	}
+	if err := r.ParseMultipartForm(16 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid avatar upload form")
+		return
+	}
+	avatarFile, header, err := r.FormFile("file")
+	if errors.Is(err, http.ErrMissingFile) {
+		avatarFile, header, err = r.FormFile("avatarFile")
+	}
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "avatar file is required")
+		return
+	}
+	_ = avatarFile.Close()
+	stored, err := a.files.SaveKind(r.Context(), user.ID, "avatar", header)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	avatarURL := "/api/users/" + strconv.FormatInt(user.ID, 10) + "/avatar"
+	updated, err := a.users.UpdateAvatar(user.ID, avatarURL, stored.StoredName)
+	if err != nil {
+		a.files.RemoveKey(user.ID, "avatar")
+		writeError(w, http.StatusInternalServerError, "failed to save avatar profile")
+		return
+	}
+	writeAPI(w, http.StatusOK, map[string]any{"avatarUrl": updated.AvatarURL})
+}
+
+func (a *app) handleUserAvatar(w http.ResponseWriter, r *http.Request) {
+	id, ok := routePathID(w, r, "id")
+	if !ok {
+		return
+	}
+	user, exists := a.users.FindByID(id)
+	if !exists || strings.TrimSpace(user.AvatarStoredName) == "" {
+		writeError(w, http.StatusNotFound, "avatar not found")
+		return
+	}
+	path := filepath.Join(a.config.UploadDir, filepath.Base(user.AvatarStoredName))
+	root, err := filepath.Abs(a.config.UploadDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "avatar storage is unavailable")
+		return
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil || !strings.HasPrefix(strings.ToLower(absolute), strings.ToLower(root+string(os.PathSeparator))) {
+		writeError(w, http.StatusNotFound, "avatar not found")
+		return
+	}
+	if _, err := os.Stat(absolute); err != nil {
+		writeError(w, http.StatusNotFound, "avatar not found")
+		return
+	}
+	http.ServeFile(w, r, absolute)
 }
 
 func (a *app) handleDeveloperStats(w http.ResponseWriter, r *http.Request) {
@@ -587,6 +705,34 @@ func (a *app) handleDeveloperDeleteGame(w http.ResponseWriter, r *http.Request) 
 	writeAPI(w, http.StatusOK, map[string]any{"id": id, "message": "已删除"})
 }
 
+func (a *app) handleDeveloperUpdateGame(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	id, ok := routeID(w, r, "games")
+	if !ok {
+		return
+	}
+	var input catalog.GameUpdate
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	var (
+		item catalog.DeveloperGame
+		err  error
+	)
+	if a.sqlCatalog != nil {
+		item, err = a.sqlCatalog.UpdateDeveloperGame(r.Context(), user.ID, id, input)
+	} else {
+		item, err = a.catalog.UpdateDeveloperGame(user.Username, id, input)
+	}
+	if !writeDeveloperGameOperationError(w, err) {
+		return
+	}
+	writeAPI(w, http.StatusOK, item)
+}
+
 func (a *app) handleUpdateDevDocs(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.currentAdmin(w, r)
 	if !ok {
@@ -637,6 +783,18 @@ func (a *app) handleCreateGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid multipart form")
 		return
 	}
+	for _, fieldName := range []string{"coverFile", "buildFile"} {
+		file, _, err := r.FormFile(fieldName)
+		if errors.Is(err, http.ErrMissingFile) {
+			writeError(w, http.StatusUnprocessableEntity, fieldName+": file is required")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid "+fieldName)
+			return
+		}
+		_ = file.Close()
+	}
 	var (
 		item catalog.Game
 		err  error
@@ -651,6 +809,7 @@ func (a *app) handleCreateGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uploaded := make(map[string]any)
+	coverURL := item.CoverURL
 	for _, field := range []struct {
 		formName string
 		kind     string
@@ -699,9 +858,15 @@ func (a *app) handleCreateGame(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if field.kind == "cover" {
+			coverURL = downloadURL
+		}
 		uploaded[field.kind] = stored
 	}
-	writeAPI(w, http.StatusCreated, map[string]any{"id": item.ID, "title": item.Title, "status": item.Status, "message": "Game submitted for review", "files": uploaded})
+	writeAPI(w, http.StatusCreated, map[string]any{
+		"id": item.ID, "title": item.Title, "status": item.Status,
+		"message": "游戏已提交审核", "coverUrl": coverURL, "files": uploaded,
+	})
 }
 
 func (a *app) removeCreatedGame(id int64) {
@@ -760,11 +925,15 @@ func (a *app) handleGame(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to load game")
 			return
 		}
+		if item.Status != "published" {
+			writeError(w, http.StatusNotFound, "game not found")
+			return
+		}
 		writeAPI(w, http.StatusOK, item)
 		return
 	}
 	item, exists := a.catalog.Game(id)
-	if !exists {
+	if !exists || item.Status != "published" {
 		writeError(w, http.StatusNotFound, "game not found")
 		return
 	}
@@ -789,7 +958,7 @@ func (a *app) handleGameSource(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to load source")
 			return
 		}
-		writeAPI(w, http.StatusOK, map[string]any{"downloadUrl": file.DownloadURL, "size": file.Size})
+		writeAPI(w, http.StatusOK, map[string]any{"downloadUrl": file.DownloadURL, "size": formatBytes(file.Size), "bytes": file.Size})
 		return
 	}
 	item, exists := a.catalog.Game(id)
@@ -933,7 +1102,11 @@ func (a *app) handleLikeGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeAPI(w, http.StatusOK, map[string]any{"liked": item.Liked, "likes": item.Likes, "changed": changed})
+	liked := item.Liked
+	if a.sqlCatalog != nil {
+		liked = true
+	}
+	writeAPI(w, http.StatusOK, map[string]any{"liked": liked, "likes": item.Likes, "changed": changed})
 }
 
 func (a *app) handlePlayGame(w http.ResponseWriter, r *http.Request) {
@@ -1065,10 +1238,171 @@ func (a *app) handleCreateForumPost(w http.ResponseWriter, r *http.Request) {
 		item, err = a.catalog.AddPost(user.Username, input.Title, input.Cat, input.Content, input.Tags, input.BarID)
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		switch {
+		case errors.Is(err, sql.ErrNoRows), strings.Contains(strings.ToLower(err.Error()), "not found"):
+			writeError(w, http.StatusNotFound, "game not found")
+		case strings.Contains(strings.ToLower(err.Error()), "invalid"):
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+		default:
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 	writeAPI(w, http.StatusCreated, item)
+}
+
+func (a *app) handleUploadForumFile(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	postID, ok := routeID(w, r, "id")
+	if !ok {
+		return
+	}
+	ownerID, status, err := a.forumPostOwner(r.Context(), postID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "post not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load post")
+		return
+	}
+	if ownerID != user.ID && !a.hasAdminAccess(user) {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if status == "published" && ownerID != user.ID && !a.hasAdminAccess(user) {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if a.files == nil {
+		writeError(w, http.StatusServiceUnavailable, "file storage is not configured")
+		return
+	}
+	if err := r.ParseMultipartForm(64 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid upload form")
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "file is required")
+		return
+	}
+	_ = file.Close()
+	stored, err := a.files.SaveKind(r.Context(), postID, "forum", header)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	attachment := catalog.ForumAttachment{
+		PostID: postID, UploaderID: user.ID, OriginalName: stored.OriginalName,
+		StoredName: stored.StoredName, Size: stored.Size, SHA256: stored.SHA256,
+	}
+	if a.sqlCatalog != nil {
+		attachment, err = a.sqlCatalog.RecordForumAttachment(r.Context(), attachment)
+	} else {
+		attachment = a.catalog.AddForumAttachment(postID, user.ID, stored.OriginalName, stored.StoredName, stored.Size, stored.SHA256)
+	}
+	if err != nil {
+		a.files.RemoveKey(postID, "forum")
+		writeError(w, http.StatusInternalServerError, "failed to record forum attachment")
+		return
+	}
+	writeAPI(w, http.StatusCreated, attachment)
+}
+
+func (a *app) handleListForumFiles(w http.ResponseWriter, r *http.Request) {
+	postID, ok := routeID(w, r, "id")
+	if !ok {
+		return
+	}
+	if !a.isPublishedForumPost(r.Context(), postID) {
+		writeError(w, http.StatusNotFound, "post not found")
+		return
+	}
+	if a.sqlCatalog != nil {
+		items, err := a.sqlCatalog.ForumAttachments(r.Context(), postID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load forum attachments")
+			return
+		}
+		writeAPI(w, http.StatusOK, items)
+		return
+	}
+	writeAPI(w, http.StatusOK, a.catalog.ForumAttachments(postID))
+}
+
+func (a *app) handleDownloadForumFile(w http.ResponseWriter, r *http.Request) {
+	postID, ok := routeID(w, r, "id")
+	if !ok {
+		return
+	}
+	fileID, ok := routePathID(w, r, "fileId")
+	if !ok {
+		return
+	}
+	if !a.isPublishedForumPost(r.Context(), postID) {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	var (
+		attachment catalog.ForumAttachment
+		err        error
+		exists     bool
+	)
+	if a.sqlCatalog != nil {
+		attachment, err = a.sqlCatalog.ForumAttachment(r.Context(), postID, fileID)
+		exists = err == nil
+	} else {
+		attachment, exists = a.catalog.ForumAttachment(postID, fileID)
+	}
+	if !exists {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to load forum attachment")
+		return
+	}
+	if a.blocklist != nil {
+		if entry, blocked := a.blocklist.Contains(attachment.SHA256); blocked {
+			writeError(w, http.StatusForbidden, "download blocked: "+entry.Reason)
+			return
+		}
+	}
+	path := filepath.Join(a.config.UploadDir, filepath.Base(attachment.StoredName))
+	if _, err := os.Stat(path); err != nil {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeHeader(attachment.OriginalName)+`"`)
+	http.ServeFile(w, r, path)
+}
+
+func (a *app) forumPostOwner(ctx context.Context, postID int64) (int64, string, error) {
+	if a.sqlCatalog != nil {
+		return a.sqlCatalog.ForumPostOwnerID(ctx, postID)
+	}
+	item, exists := a.catalog.Post(postID)
+	if !exists {
+		return 0, "", sql.ErrNoRows
+	}
+	user, exists := a.users.FindByUsername(strings.TrimPrefix(item.Name, "@"))
+	if !exists {
+		return 0, item.Status, sql.ErrNoRows
+	}
+	return user.ID, item.Status, nil
+}
+
+func (a *app) isPublishedForumPost(ctx context.Context, postID int64) bool {
+	if a.sqlCatalog != nil {
+		item, err := a.sqlCatalog.ForumPostByID(ctx, postID)
+		return err == nil && item.Status == "published"
+	}
+	item, exists := a.catalog.Post(postID)
+	return exists && item.Status == "published"
 }
 
 func (a *app) handleLikeForumPost(w http.ResponseWriter, r *http.Request) {
@@ -1091,7 +1425,11 @@ func (a *app) handleLikeForumPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeAPI(w, http.StatusOK, map[string]any{"liked": item.Liked, "likes": item.Likes, "changed": changed})
+	liked := item.Liked
+	if a.sqlCatalog != nil {
+		liked = true
+	}
+	writeAPI(w, http.StatusOK, map[string]any{"liked": liked, "likes": item.Likes, "changed": changed})
 }
 
 func (a *app) handleLikeReply(w http.ResponseWriter, r *http.Request) {
@@ -1510,12 +1848,8 @@ func (a *app) handleRejectPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) auditPost(w http.ResponseWriter, r *http.Request, approved bool) {
-	user, ok := a.currentUser(w, r)
+	user, ok := a.currentAdmin(w, r)
 	if !ok {
-		return
-	}
-	if !admin.CanManage(user) {
-		writeError(w, http.StatusForbidden, "admin role required")
 		return
 	}
 
@@ -1623,7 +1957,15 @@ func (a *app) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		_, activeUsers := a.users.Counts(time.Now().UTC())
 		stats["activeUsers"] = activeUsers
-		stats["reports"] = 0
+		reportCount := 0
+		if a.reports != nil {
+			reportCount, err = a.reports.PendingCount(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load report stats")
+				return
+			}
+		}
+		stats["reports"] = reportCount
 		writeAPI(w, http.StatusOK, stats)
 		return
 	}
@@ -1639,12 +1981,96 @@ func (a *app) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 			pendingPosts++
 		}
 	}
+	reportCount := 0
+	if a.reports != nil {
+		reportCount, _ = a.reports.PendingCount(r.Context())
+	}
 	writeAPI(w, http.StatusOK, map[string]any{
 		"pendingGames": pendingGames,
 		"pendingPosts": pendingPosts,
 		"activeUsers":  activeUsers,
-		"reports":      0,
+		"reports":      reportCount,
 	})
+}
+
+func (a *app) handleAdminGames(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.currentAdmin(w, r); !ok {
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	if status == "" {
+		status = "all"
+	}
+	if a.sqlCatalog != nil {
+		items, err := a.sqlCatalog.AdminGames(r.Context(), status)
+		if err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		writeAPI(w, http.StatusOK, items)
+		return
+	}
+	if !validDeveloperGameStatus(status) {
+		writeError(w, http.StatusUnprocessableEntity, "invalid game status")
+		return
+	}
+	items := make([]catalog.DeveloperGame, 0)
+	for _, item := range a.catalog.Games() {
+		if status != "all" && item.Status != status {
+			continue
+		}
+		items = append(items, catalog.DeveloperGame{
+			ID: item.ID, Title: item.Title, Author: strings.TrimPrefix(item.Author, "@"), Glyph: item.Glyph,
+			Cover: item.Cover, CoverURL: item.CoverURL, Status: item.Status, Genre: item.Genre,
+			Engine: item.Engine, Version: "v1.0.0", Likes: item.Likes, CreatedAt: item.CreatedAt,
+			PlayURL: item.PlayURL, SourceURL: item.SourceURL,
+		})
+	}
+	writeAPI(w, http.StatusOK, items)
+}
+
+func (a *app) handleAdminPosts(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.currentAdmin(w, r); !ok {
+		return
+	}
+	page := positiveInt(r.URL.Query().Get("page"), 1)
+	pageSize := positiveInt(r.URL.Query().Get("pageSize"), 20)
+	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	if status == "" {
+		status = "pending"
+	}
+	if a.sqlCatalog != nil {
+		items, total, err := a.sqlCatalog.AdminForumPosts(r.Context(), page, pageSize, status)
+		if err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		writeAPI(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "pageSize": pageSize})
+		return
+	}
+	items, total, err := a.catalog.AdminForumPosts(status)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeAPI(w, http.StatusOK, map[string]any{
+		"page": page, "pageSize": pageSize, "total": total,
+		"items": slicePage(items, page, pageSize),
+	})
+}
+
+func (a *app) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.currentAdmin(w, r); !ok {
+		return
+	}
+	page := positiveInt(r.URL.Query().Get("page"), 1)
+	pageSize := positiveInt(r.URL.Query().Get("pageSize"), 20)
+	items, total, err := a.users.ListAdminUsers(page, pageSize, time.Now().UTC())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load users")
+		return
+	}
+	writeAPI(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "pageSize": pageSize})
 }
 
 func (a *app) handleReviewGame(w http.ResponseWriter, r *http.Request) {
@@ -1666,12 +2092,12 @@ func (a *app) handleReviewGame(w http.ResponseWriter, r *http.Request) {
 	var item catalog.Game
 	var err error
 	if a.sqlCatalog != nil {
-		err = a.sqlCatalog.ReviewGame(r.Context(), id, input.Status)
+		err = a.sqlCatalog.ReviewGame(r.Context(), id, input.Status, input.Reason)
 		if err == nil {
 			item, err = a.sqlCatalog.Game(r.Context(), id)
 		}
 	} else {
-		item, err = a.catalog.ReviewGame(id, input.Status)
+		item, err = a.catalog.ReviewGame(id, input.Status, input.Reason)
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1679,6 +2105,123 @@ func (a *app) handleReviewGame(w http.ResponseWriter, r *http.Request) {
 	}
 	a.logAdminAction(user.ID, "review_game", "game", id, map[string]any{"status": input.Status, "reason": input.Reason})
 	writeAPI(w, http.StatusOK, map[string]any{"item": item, "reason": input.Reason})
+}
+
+func (a *app) handleAdminReports(w http.ResponseWriter, r *http.Request) {
+	adminUser, ok := a.currentAdmin(w, r)
+	if !ok {
+		return
+	}
+	if a.reports == nil {
+		writeError(w, http.StatusServiceUnavailable, "report service is not configured")
+		return
+	}
+	page := positiveInt(r.URL.Query().Get("page"), 1)
+	pageSize := positiveInt(r.URL.Query().Get("pageSize"), 20)
+	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	if status == "" {
+		status = "pending"
+	}
+	items, total, err := a.reports.List(r.Context(), page, pageSize, status)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	for index := range items {
+		if items[index].Target == "" {
+			items[index].Target = items[index].TargetType + ":" + strconv.FormatInt(items[index].TargetID, 10)
+		}
+	}
+	_ = adminUser
+	writeAPI(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "pageSize": pageSize})
+}
+
+func (a *app) handleResolveAdminReport(w http.ResponseWriter, r *http.Request) {
+	adminUser, ok := a.currentAdmin(w, r)
+	if !ok {
+		return
+	}
+	id, ok := routeID(w, r, "reports")
+	if !ok {
+		return
+	}
+	if a.reports == nil {
+		writeError(w, http.StatusServiceUnavailable, "report service is not configured")
+		return
+	}
+	var input struct {
+		Status     string `json:"status"`
+		Resolution string `json:"resolution"`
+		Note       string `json:"note"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+	}
+	if input.Status == "" {
+		input.Status = "resolved"
+	}
+	if input.Resolution == "" {
+		input.Resolution = input.Note
+	}
+	item, err := a.reports.Resolve(r.Context(), id, adminUser.ID, input.Status, input.Resolution)
+	if errors.Is(err, reports.ErrNotFound) {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if errors.Is(err, reports.ErrConflict) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, reports.ErrInvalidStatus) {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve report")
+		return
+	}
+	a.logAdminAction(adminUser.ID, "resolve_report", "report", id, map[string]any{"status": item.Status, "resolution": item.Resolution})
+	writeAPI(w, http.StatusOK, item)
+}
+
+func (a *app) handleCreateReport(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	if a.reports == nil {
+		writeError(w, http.StatusServiceUnavailable, "report service is not configured")
+		return
+	}
+	var input struct {
+		TargetType  string `json:"targetType"`
+		Type        string `json:"type"`
+		TargetID    int64  `json:"targetId"`
+		Reason      string `json:"reason"`
+		Details     string `json:"details"`
+		Description string `json:"description"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.TargetType == "" {
+		input.TargetType = input.Type
+	}
+	if input.Details == "" {
+		input.Details = input.Description
+	}
+	item, err := a.reports.Create(r.Context(), user.ID, input.TargetType, input.TargetID, input.Reason, input.Details)
+	if errors.Is(err, reports.ErrInvalidTarget) || errors.Is(err, reports.ErrInvalidReason) {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create report")
+		return
+	}
+	writeAPI(w, http.StatusCreated, item)
 }
 
 func (a *app) handleReviewForumPost(w http.ResponseWriter, r *http.Request) {
@@ -1741,7 +2284,25 @@ func (a *app) handleBanUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.logAdminAction(adminUser.ID, "ban_user", "user", id, map[string]any{"reason": input.Reason, "until": input.Until.UTC()})
-	writeAPI(w, http.StatusOK, map[string]any{"user": publicUser(user, "password"), "reason": input.Reason, "until": input.Until.UTC()})
+	writeAPI(w, http.StatusOK, map[string]any{"user": a.publicUser(user, "password"), "reason": input.Reason, "until": input.Until.UTC()})
+}
+
+func (a *app) handleUnbanUser(w http.ResponseWriter, r *http.Request) {
+	adminUser, ok := a.currentAdmin(w, r)
+	if !ok {
+		return
+	}
+	id, ok := routeID(w, r, "users")
+	if !ok {
+		return
+	}
+	user, err := a.users.Unban(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	a.logAdminAction(adminUser.ID, "unban_user", "user", id, nil)
+	writeAPI(w, http.StatusOK, map[string]any{"user": a.publicUser(user, "password"), "message": "已解除封禁"})
 }
 
 func (a *app) currentUser(w http.ResponseWriter, r *http.Request) (users.User, bool) {
@@ -1810,7 +2371,7 @@ func (a *app) currentAdmin(w http.ResponseWriter, r *http.Request) (users.User, 
 	if !ok {
 		return users.User{}, false
 	}
-	if !admin.CanManage(user) {
+	if !a.hasAdminAccess(user) {
 		writeError(w, http.StatusForbidden, "admin role required")
 		return users.User{}, false
 	}
@@ -1876,15 +2437,34 @@ func writeAPI(w http.ResponseWriter, status int, data any) {
 	writeJSON(w, status, response{"code": 0, "message": "success", "data": data, "success": true})
 }
 
-func publicUser(user users.User, method string) map[string]any {
+func (a *app) publicUser(user users.User, method string) map[string]any {
 	initial := "?"
 	if user.Username != "" {
 		initial = strings.ToUpper(string([]rune(user.Username)[0]))
 	}
-	return map[string]any{"id": user.ID, "name": user.Username, "initial": initial, "avatar": "", "level": "lv1", "role": user.Role, "method": method}
+	adminAccess := a.hasAdminAccess(user)
+	role := user.Role
+	if user.Role == users.RoleAdmin && !adminAccess {
+		role = users.RoleUser
+	}
+	return map[string]any{
+		"id": user.ID, "name": user.Username, "initial": initial, "avatar": "",
+		"level": "lv1", "role": role, "method": method, "adminAccess": adminAccess,
+	}
 }
 
-func developerProfile(user users.User) map[string]any {
+func (a *app) hasAdminAccess(user users.User) bool {
+	if !admin.CanManage(user) {
+		return false
+	}
+	adminAccount := strings.ToLower(strings.TrimSpace(a.config.AdminAccount))
+	if adminAccount == "" {
+		return true
+	}
+	return strings.ToLower(strings.TrimSpace(user.Email)) == adminAccount
+}
+
+func (a *app) developerProfile(ctx context.Context, user users.User) map[string]any {
 	initial := "?"
 	if user.Username != "" {
 		initial = strings.ToUpper(string([]rune(user.Username)[0]))
@@ -1893,14 +2473,61 @@ func developerProfile(user users.User) map[string]any {
 		"id":        user.ID,
 		"name":      user.Username,
 		"initial":   initial,
-		"avatarUrl": "",
+		"avatarUrl": user.AvatarURL,
 		"level":     "lv1",
-		"verified":  user.Role == users.RoleAdmin,
-		"bio":       "",
-		"location":  "",
+		"verified":  a.hasAdminAccess(user),
+		"bio":       user.Bio,
+		"location":  user.Location,
 		"joinedAt":  user.CreatedAt.UTC().Format(time.RFC3339),
-		"engines":   []string{},
+		"engines":   mergeEngines(user.DeveloperEngines, a.developerEngines(ctx, user)),
 	}
+}
+
+func mergeEngines(groups ...[]string) []string {
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, group := range groups {
+		for _, engine := range group {
+			engine = strings.TrimSpace(engine)
+			if engine == "" {
+				continue
+			}
+			key := strings.ToLower(engine)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, engine)
+		}
+	}
+	return result
+}
+
+func (a *app) developerEngines(ctx context.Context, user users.User) []string {
+	var games []catalog.DeveloperGame
+	if a.sqlCatalog != nil {
+		items, err := a.sqlCatalog.DeveloperGames(ctx, user.ID, "all")
+		if err == nil {
+			games = items
+		}
+	} else if a.catalog != nil {
+		games = a.catalog.DeveloperGames(user.Username, "all")
+	}
+	seen := make(map[string]struct{})
+	engines := make([]string, 0)
+	for _, item := range games {
+		engine := strings.TrimSpace(item.Engine)
+		if engine == "" {
+			continue
+		}
+		key := strings.ToLower(engine)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		engines = append(engines, engine)
+	}
+	return engines
 }
 
 func validDeveloperGameStatus(status string) bool {
@@ -1961,6 +2588,25 @@ func writeDeveloperGameOperationError(w http.ResponseWriter, err error) bool {
 	return false
 }
 
+func formatBytes(size int64) string {
+	if size < 0 {
+		size = 0
+	}
+	const unit int64 = 1024
+	if size < unit {
+		return strconv.FormatInt(size, 10) + " B"
+	}
+	units := []string{"KB", "MB", "GB", "TB"}
+	value := float64(size)
+	for _, suffix := range units {
+		value = value / float64(unit)
+		if value < float64(unit) {
+			return strconv.FormatFloat(value, 'f', 1, 64) + " " + suffix
+		}
+	}
+	return strconv.FormatFloat(value, 'f', 1, 64) + " TB"
+}
+
 func publishedPosts(items []catalog.ForumPost) []catalog.ForumPost {
 	result := make([]catalog.ForumPost, 0, len(items))
 	for _, item := range items {
@@ -1973,7 +2619,16 @@ func publishedPosts(items []catalog.ForumPost) []catalog.ForumPost {
 
 func paginate(items any, r *http.Request) map[string]any {
 	page, pageSize := positiveInt(r.URL.Query().Get("page"), 1), positiveInt(r.URL.Query().Get("pageSize"), 20)
-	// Keep pagination generic for the phase-one read APIs while preserving typed slices.
+	return map[string]any{"page": page, "pageSize": pageSize, "total": reflect.ValueOf(items).Len(), "items": slicePage(items, page, pageSize)}
+}
+
+func slicePage(items any, page, pageSize int) any {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
 	value := reflect.ValueOf(items)
 	total := value.Len()
 	start := (page - 1) * pageSize
@@ -1984,7 +2639,7 @@ func paginate(items any, r *http.Request) map[string]any {
 	if end > total {
 		end = total
 	}
-	return map[string]any{"page": page, "pageSize": pageSize, "total": total, "items": value.Slice(start, end).Interface()}
+	return value.Slice(start, end).Interface()
 }
 
 func positiveInt(value string, fallback int) int {

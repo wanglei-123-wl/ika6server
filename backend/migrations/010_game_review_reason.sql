@@ -1,0 +1,3 @@
+ALTER TABLE games
+  ADD COLUMN IF NOT EXISTS review_reason TEXT NOT NULL DEFAULT '';
+

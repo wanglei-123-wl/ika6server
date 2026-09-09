@@ -14,6 +14,8 @@ func TestValidateUpload(t *testing.T) {
 	}{
 		{name: "cover accepts image", kind: "cover", header: &multipart.FileHeader{Filename: "cover.png", Size: 1024}},
 		{name: "cover rejects archive", kind: "cover", header: &multipart.FileHeader{Filename: "cover.zip", Size: 1024}, wantErr: true},
+		{name: "build accepts zip", kind: "build", header: &multipart.FileHeader{Filename: "build.zip", Size: 1024}},
+		{name: "build rejects non-zip", kind: "build", header: &multipart.FileHeader{Filename: "build.tar", Size: 1024}, wantErr: true},
 		{name: "package accepts zip", kind: "source", header: &multipart.FileHeader{Filename: "source.zip", Size: 1024}},
 		{name: "package rejects script", kind: "source", header: &multipart.FileHeader{Filename: "source.ps1", Size: 1024}, wantErr: true},
 		{name: "empty rejects", kind: "source", header: &multipart.FileHeader{Filename: "source.zip", Size: 0}, wantErr: true},

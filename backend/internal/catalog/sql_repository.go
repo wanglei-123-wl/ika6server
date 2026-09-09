@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type SQLRepository struct {
@@ -115,18 +116,29 @@ func (r *SQLRepository) LikeGame(ctx context.Context, gameID, userID int64) (boo
 }
 
 func (r *SQLRepository) PlayGame(ctx context.Context, gameID int64) error {
-	result, err := r.db.ExecContext(ctx, `UPDATE games SET plays = plays + 1, updated_at = now() WHERE id = $1 AND status = 'published'`, gameID)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE games SET plays = plays + 1, updated_at = now() WHERE id = $1 AND status = 'published'`, gameID)
 	if err != nil {
 		return err
 	}
 	count, err := result.RowsAffected()
-	if err == nil && count == 0 {
+	if err != nil {
+		return err
+	}
+	if count == 0 {
 		return sql.ErrNoRows
 	}
-	return err
+	if _, err := tx.ExecContext(ctx, `INSERT INTO game_play_events (game_id) VALUES ($1)`, gameID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-func (r *SQLRepository) ReviewGame(ctx context.Context, gameID int64, status string) error {
+func (r *SQLRepository) ReviewGame(ctx context.Context, gameID int64, status, reason string) error {
 	status = strings.ToLower(strings.TrimSpace(status))
 	if status == "approved" {
 		status = "published"
@@ -134,7 +146,11 @@ func (r *SQLRepository) ReviewGame(ctx context.Context, gameID int64, status str
 	if status != "published" && status != "rejected" && status != "offline" {
 		return errors.New("invalid game review status")
 	}
-	result, err := r.db.ExecContext(ctx, `UPDATE games SET status = $1, updated_at = now() WHERE id = $2`, status, gameID)
+	reviewReason := ""
+	if status == "rejected" {
+		reviewReason = strings.TrimSpace(reason)
+	}
+	result, err := r.db.ExecContext(ctx, `UPDATE games SET status = $1, review_reason = $2, updated_at = now() WHERE id = $3`, status, reviewReason, gameID)
 	if err != nil {
 		return err
 	}
@@ -809,18 +825,27 @@ func (r *SQLRepository) PublishedGameFile(ctx context.Context, gameID int64, kin
 }
 
 func (r *SQLRepository) IncrementGameFileDownloads(ctx context.Context, gameID int64, kind string) error {
-	result, err := r.db.ExecContext(ctx, `
-		UPDATE game_files
-		SET downloads = downloads + 1
-		WHERE game_id = $1 AND kind = $2`, gameID, strings.ToLower(strings.TrimSpace(kind)))
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	count, err := result.RowsAffected()
-	if err == nil && count == 0 {
+	defer tx.Rollback()
+	var fileID int64
+	err = tx.QueryRowContext(ctx, `
+		UPDATE game_files
+		SET downloads = downloads + 1
+		WHERE game_id = $1 AND kind = $2
+		RETURNING id`, gameID, strings.ToLower(strings.TrimSpace(kind))).Scan(&fileID)
+	if errors.Is(err, sql.ErrNoRows) {
 		return sql.ErrNoRows
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO game_download_events (game_id, file_id) VALUES ($1, $2)`, gameID, fileID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *SQLRepository) DownloadGameSource(ctx context.Context, gameID int64) (GameFile, error) {
@@ -849,7 +874,7 @@ func (r *SQLRepository) DeveloperGames(ctx context.Context, ownerID int64, statu
 		args = append(args, status)
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT g.id, g.title, g.engine, g.genre, g.status, g.cover_url,
+		SELECT g.id, g.title, g.engine, g.genre, g.status, g.review_reason, g.cover_url,
 		       g.play_url, g.source_url, g.plays, g.likes, g.created_at, g.updated_at,
 		       COALESCE(files.downloads, 0)
 		FROM games g
@@ -889,7 +914,275 @@ func (r *SQLRepository) DeveloperStats(ctx context.Context, ownerID int64) (Deve
 		FROM game_files f
 		JOIN games g ON g.id = f.game_id
 		WHERE g.owner_id = $1`, ownerID).Scan(&stats.TotalDownloads)
-	return stats, err
+	if err != nil {
+		return DeveloperStats{}, err
+	}
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_follows WHERE follower_id = $1`, ownerID).Scan(&stats.Following); err != nil {
+		return DeveloperStats{}, err
+	}
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_follows WHERE followed_id = $1`, ownerID).Scan(&stats.Followers); err != nil {
+		return DeveloperStats{}, err
+	}
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(amount_cents), 0)
+		FROM sponsor_transactions
+		WHERE creator_id = $1 AND status = 'completed'`, ownerID).Scan(&stats.SponsorIncome); err != nil {
+		return DeveloperStats{}, err
+	}
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM user_follows
+		WHERE followed_id = $1 AND created_at >= now() - INTERVAL '7 days'`, ownerID).Scan(&stats.WeeklyNewFollowers); err != nil {
+		return DeveloperStats{}, err
+	}
+	var current, previous int64
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FILTER (WHERE e.created_at >= now() - INTERVAL '7 days'),
+		       COUNT(*) FILTER (WHERE e.created_at >= now() - INTERVAL '14 days' AND e.created_at < now() - INTERVAL '7 days')
+		FROM game_play_events e
+		JOIN games g ON g.id = e.game_id
+		WHERE g.owner_id = $1`, ownerID).Scan(&current, &previous); err != nil {
+		return DeveloperStats{}, err
+	}
+	stats.PlayTrend = trend(current, previous)
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FILTER (WHERE e.created_at >= now() - INTERVAL '7 days'),
+		       COUNT(*) FILTER (WHERE e.created_at >= now() - INTERVAL '14 days' AND e.created_at < now() - INTERVAL '7 days')
+		FROM game_download_events e
+		JOIN games g ON g.id = e.game_id
+		WHERE g.owner_id = $1`, ownerID).Scan(&current, &previous); err != nil {
+		return DeveloperStats{}, err
+	}
+	stats.DownloadTrend = trend(current, previous)
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FILTER (WHERE l.created_at >= now() - INTERVAL '7 days'),
+		       COUNT(*) FILTER (WHERE l.created_at >= now() - INTERVAL '14 days' AND l.created_at < now() - INTERVAL '7 days')
+		FROM game_likes l
+		JOIN games g ON g.id = l.game_id
+		WHERE g.owner_id = $1`, ownerID).Scan(&current, &previous); err != nil {
+		return DeveloperStats{}, err
+	}
+	stats.LikeTrend = trend(current, previous)
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FILTER (WHERE created_at >= now() - INTERVAL '7 days'),
+		       COUNT(*) FILTER (WHERE created_at >= now() - INTERVAL '14 days' AND created_at < now() - INTERVAL '7 days')
+		FROM sponsor_transactions
+		WHERE creator_id = $1 AND status = 'completed'`, ownerID).Scan(&current, &previous); err != nil {
+		return DeveloperStats{}, err
+	}
+	stats.IncomeTrend = trend(current, previous)
+	return stats, nil
+}
+
+func trend(current, previous int64) string {
+	if current == 0 && previous == 0 {
+		return ""
+	}
+	if previous == 0 {
+		return "+100%"
+	}
+	change := (float64(current) - float64(previous)) / float64(previous) * 100
+	sign := ""
+	if change >= 0 {
+		sign = "+"
+	}
+	return sign + strconv.FormatFloat(change, 'f', 1, 64) + "%"
+}
+
+func (r *SQLRepository) AdminGames(ctx context.Context, status string) ([]DeveloperGame, error) {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "" {
+		status = "all"
+	}
+	if status != "all" && status != "published" && status != "reviewing" && status != "rejected" && status != "draft" && status != "offline" {
+		return nil, errors.New("invalid game status")
+	}
+	statusFilter := ""
+	args := []any{}
+	if status != "all" {
+		statusFilter = "WHERE g.status = $1"
+		args = append(args, status)
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT g.id, g.title, u.username, g.engine, g.genre, g.status, g.review_reason, g.cover_url,
+		       g.play_url, g.source_url, g.plays, g.likes, g.created_at, g.updated_at,
+		       COALESCE(files.downloads, 0)
+		FROM games g
+		JOIN users u ON u.id = g.owner_id
+		LEFT JOIN (
+			SELECT game_id, SUM(downloads) AS downloads
+			FROM game_files
+			GROUP BY game_id
+		) files ON files.game_id = g.id
+		`+statusFilter+`
+		ORDER BY g.updated_at DESC, g.id DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]DeveloperGame, 0)
+	for rows.Next() {
+		item, err := scanAdminGame(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *SQLRepository) UpdateDeveloperGame(ctx context.Context, ownerID, gameID int64, update GameUpdate) (DeveloperGame, error) {
+	if !update.hasFields() {
+		return DeveloperGame{}, errors.New("at least one game field is required")
+	}
+	if update.Title != nil && strings.TrimSpace(*update.Title) == "" {
+		return DeveloperGame{}, errors.New("title is required")
+	}
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE games
+		SET title = COALESCE($3, title),
+		    summary = COALESCE($4, summary),
+		    description = COALESCE($5, description),
+		    engine = COALESCE($6, engine),
+		    genre = COALESCE($7, genre),
+		    license = COALESCE($8, license),
+		    cover_url = COALESCE($9, cover_url),
+		    updated_at = now()
+		WHERE id = $1 AND owner_id = $2 AND status IN ('draft', 'rejected', 'offline')`,
+		gameID, ownerID, update.Title, update.Summary, update.Description, update.Engine, update.Genre, update.License, update.CoverURL)
+	if err != nil {
+		return DeveloperGame{}, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return DeveloperGame{}, err
+	}
+	if count == 0 {
+		return r.developerGameOperationError(ctx, ownerID, gameID)
+	}
+	return r.DeveloperGame(ctx, ownerID, gameID)
+}
+
+func (u GameUpdate) hasFields() bool {
+	return u.Title != nil || u.Summary != nil || u.Description != nil || u.Engine != nil || u.Genre != nil || u.License != nil || u.CoverURL != nil
+}
+
+func (r *SQLRepository) ForumPostOwnerID(ctx context.Context, postID int64) (int64, string, error) {
+	var ownerID int64
+	var status string
+	err := r.db.QueryRowContext(ctx, `SELECT author_id, status FROM forum_posts WHERE id = $1`, postID).Scan(&ownerID, &status)
+	return ownerID, status, err
+}
+
+func (r *SQLRepository) RecordForumAttachment(ctx context.Context, attachment ForumAttachment) (ForumAttachment, error) {
+	if attachment.PostID <= 0 || attachment.UploaderID <= 0 || strings.TrimSpace(attachment.OriginalName) == "" || strings.TrimSpace(attachment.StoredName) == "" {
+		return ForumAttachment{}, errors.New("forum attachment metadata is required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ForumAttachment{}, err
+	}
+	defer tx.Rollback()
+	var id int64
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO forum_attachments (post_id, uploader_id, original_name, stored_name, size, sha256)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id`, attachment.PostID, attachment.UploaderID, attachment.OriginalName, attachment.StoredName, attachment.Size, attachment.SHA256).Scan(&id)
+	if err != nil {
+		return ForumAttachment{}, err
+	}
+	url := "/api/forum/posts/" + IDString(attachment.PostID) + "/files/" + IDString(id)
+	if _, err := tx.ExecContext(ctx, `UPDATE forum_attachments SET download_url = $1 WHERE id = $2`, url, id); err != nil {
+		return ForumAttachment{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ForumAttachment{}, err
+	}
+	attachment.ID = id
+	attachment.DownloadURL = url
+	attachment.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	return attachment, nil
+}
+
+func (r *SQLRepository) ForumAttachments(ctx context.Context, postID int64) ([]ForumAttachment, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, post_id, uploader_id, original_name, stored_name, size, sha256, download_url, created_at
+		FROM forum_attachments
+		WHERE post_id = $1
+		ORDER BY created_at ASC, id ASC`, postID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ForumAttachment, 0)
+	for rows.Next() {
+		item, err := scanForumAttachment(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *SQLRepository) ForumAttachment(ctx context.Context, postID, fileID int64) (ForumAttachment, error) {
+	return scanForumAttachment(r.db.QueryRowContext(ctx, `
+		SELECT id, post_id, uploader_id, original_name, stored_name, size, sha256, download_url, created_at
+		FROM forum_attachments
+		WHERE post_id = $1 AND id = $2`, postID, fileID))
+}
+
+func (r *SQLRepository) AdminForumPosts(ctx context.Context, page, pageSize int, status string) ([]AdminForumPost, int, error) {
+	status = normalizeForumPostStatus(status)
+	if status == "" {
+		return nil, 0, errors.New("invalid post status")
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	filter := ""
+	args := []any{}
+	if status != "all" {
+		filter = "WHERE p.status = $1"
+		args = append(args, status)
+	}
+	var total int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM forum_posts p `+filter, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	args = append(args, pageSize, (page-1)*pageSize)
+	limitIndex := len(args) - 1
+	offsetIndex := len(args)
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT p.id, p.title, u.username, p.content, p.status, p.created_at,
+		       COUNT(c.id), p.views
+		FROM forum_posts p
+		JOIN users u ON u.id = p.author_id
+		LEFT JOIN comments c ON c.post_id = p.id
+		`+filter+`
+		GROUP BY p.id, u.username
+		ORDER BY p.created_at DESC, p.id DESC
+		LIMIT $`+strconv.Itoa(limitIndex)+` OFFSET $`+strconv.Itoa(offsetIndex), args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := make([]AdminForumPost, 0)
+	for rows.Next() {
+		var item AdminForumPost
+		var createdAt sql.NullTime
+		if err := rows.Scan(&item.ID, &item.Title, &item.Author, &item.Content, &item.Status, &createdAt, &item.ReplyCount, &item.Views); err != nil {
+			return nil, 0, err
+		}
+		if createdAt.Valid {
+			item.CreatedAt = createdAt.Time.UTC().Format(time.RFC3339)
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
 }
 
 func (r *SQLRepository) ResubmitDeveloperGame(ctx context.Context, ownerID, gameID int64) (DeveloperGame, error) {
@@ -967,7 +1260,7 @@ func (r *SQLRepository) RecordDeveloperReviewUrge(ctx context.Context, ownerID, 
 
 func (r *SQLRepository) DeveloperGame(ctx context.Context, ownerID, gameID int64) (DeveloperGame, error) {
 	return scanDeveloperGame(r.db.QueryRowContext(ctx, `
-		SELECT g.id, g.title, g.engine, g.genre, g.status, g.cover_url,
+		SELECT g.id, g.title, g.engine, g.genre, g.status, g.review_reason, g.cover_url,
 		       g.play_url, g.source_url, g.plays, g.likes, g.created_at, g.updated_at,
 		       COALESCE(files.downloads, 0)
 		FROM games g
@@ -1183,6 +1476,18 @@ func forumPostFromRow(item ForumPost, author, content string, likes, views, repl
 	return item
 }
 
+func scanForumAttachment(row rowScanner) (ForumAttachment, error) {
+	var item ForumAttachment
+	var createdAt sql.NullTime
+	if err := row.Scan(&item.ID, &item.PostID, &item.UploaderID, &item.OriginalName, &item.StoredName, &item.Size, &item.SHA256, &item.DownloadURL, &createdAt); err != nil {
+		return ForumAttachment{}, err
+	}
+	if createdAt.Valid {
+		item.CreatedAt = createdAt.Time.UTC().Format(time.RFC3339)
+	}
+	return item, nil
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -1208,7 +1513,32 @@ func scanGame(row rowScanner) (Game, error) {
 func scanDeveloperGame(row rowScanner) (DeveloperGame, error) {
 	var item DeveloperGame
 	var createdAt, updatedAt sql.NullTime
-	err := row.Scan(&item.ID, &item.Title, &item.Engine, &item.Genre, &item.Status, &item.CoverURL,
+	err := row.Scan(&item.ID, &item.Title, &item.Engine, &item.Genre, &item.Status, &item.RejectReason, &item.CoverURL,
+		&item.PlayURL, &item.SourceURL, &item.Plays, &item.Likes, &createdAt, &updatedAt, &item.Downloads)
+	if err != nil {
+		return DeveloperGame{}, err
+	}
+	item.Glyph = "◆"
+	item.Version = "v1.0.0"
+	item.ReviewProgress = reviewProgress(item.Status)
+	item.ReviewMessage = reviewMessage(item.Status)
+	if createdAt.Valid {
+		item.CreatedAt = createdAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
+	}
+	if updatedAt.Valid {
+		item.UpdatedAt = updatedAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
+	}
+	if item.Status != "published" {
+		item.PlayURL = ""
+		item.SourceURL = ""
+	}
+	return item, nil
+}
+
+func scanAdminGame(row rowScanner) (DeveloperGame, error) {
+	var item DeveloperGame
+	var createdAt, updatedAt sql.NullTime
+	err := row.Scan(&item.ID, &item.Title, &item.Author, &item.Engine, &item.Genre, &item.Status, &item.RejectReason, &item.CoverURL,
 		&item.PlayURL, &item.SourceURL, &item.Plays, &item.Likes, &createdAt, &updatedAt, &item.Downloads)
 	if err != nil {
 		return DeveloperGame{}, err

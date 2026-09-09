@@ -110,3 +110,37 @@ func TestDeveloperReviewUrgesMigrationExists(t *testing.T) {
 		}
 	}
 }
+
+func TestGameReviewReasonMigrationExists(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "migrations", "010_game_review_reason.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(content)
+	for _, fragment := range []string{"ALTER TABLE games", "ADD COLUMN IF NOT EXISTS review_reason", "TEXT NOT NULL DEFAULT ''"} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("game review reason migration is missing %q", fragment)
+		}
+	}
+}
+
+func TestBackendCompletionMigrationExists(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "migrations", "011_backend_completion.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(content)
+	for _, fragment := range []string{
+		"ALTER TABLE users",
+		"CREATE TABLE IF NOT EXISTS reports",
+		"CREATE TABLE IF NOT EXISTS user_follows",
+		"CREATE TABLE IF NOT EXISTS sponsor_transactions",
+		"CREATE TABLE IF NOT EXISTS game_play_events",
+		"CREATE TABLE IF NOT EXISTS game_download_events",
+		"CREATE TABLE IF NOT EXISTS forum_attachments",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("backend completion migration is missing %q", fragment)
+		}
+	}
+}

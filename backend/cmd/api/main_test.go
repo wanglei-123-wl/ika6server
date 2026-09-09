@@ -19,6 +19,7 @@ import (
 	"github.com/wanglei-123-wl/ika6server/backend/internal/database"
 	playdeploy "github.com/wanglei-123-wl/ika6server/backend/internal/play"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/posts"
+	"github.com/wanglei-123-wl/ika6server/backend/internal/reports"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/reputation"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/users"
 )
@@ -35,6 +36,7 @@ func testApp() *app {
 		auditLog:    audit.NewMemoryLogger(),
 		catalog:     catalog.NewStore(),
 		reputation:  reputation.NewStore(),
+		reports:     reports.NewStore(),
 		reviewUrges: make(map[string]time.Time),
 	}
 }
@@ -115,6 +117,42 @@ func TestPhaseOneContracts(t *testing.T) {
 	handler.ServeHTTP(repoDownload, httptest.NewRequest(http.MethodGet, "/api/repos/1/download", nil))
 	if repoDownload.Code != http.StatusUnauthorized {
 		t.Fatalf("repository download without auth status = %d, body = %s", repoDownload.Code, repoDownload.Body.String())
+	}
+}
+
+func TestConfiguredAdminAccessContract(t *testing.T) {
+	a := testApp()
+	a.config.AdminAccount = "admin@test.com"
+	handler := testHandler(a)
+
+	adminToken := registerTestUserWithCredentials(t, handler, "admin", "admin@test.com")
+	me := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	handler.ServeHTTP(me, request)
+	if me.Code != http.StatusOK || !strings.Contains(me.Body.String(), `"role":"admin"`) || !strings.Contains(me.Body.String(), `"adminAccess":true`) {
+		t.Fatalf("configured admin me failed: %d %s", me.Code, me.Body.String())
+	}
+
+	guarded := testApp()
+	guarded.config.AdminAccount = "unique-admin@test.com"
+	guardedHandler := testHandler(guarded)
+	fakeAdminToken := registerTestUserWithCredentials(t, guardedHandler, "admin", "admin@test.com")
+
+	forbidden := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/admin/dashboard", nil)
+	request.Header.Set("Authorization", "Bearer "+fakeAdminToken)
+	guardedHandler.ServeHTTP(forbidden, request)
+	if forbidden.Code != http.StatusForbidden || !strings.Contains(forbidden.Body.String(), `"errorCode":"FORBIDDEN"`) {
+		t.Fatalf("misconfigured admin status = %d, body = %s", forbidden.Code, forbidden.Body.String())
+	}
+
+	fakeMe := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	request.Header.Set("Authorization", "Bearer "+fakeAdminToken)
+	guardedHandler.ServeHTTP(fakeMe, request)
+	if fakeMe.Code != http.StatusOK || !strings.Contains(fakeMe.Body.String(), `"role":"user"`) || !strings.Contains(fakeMe.Body.String(), `"adminAccess":false`) {
+		t.Fatalf("misconfigured admin public user leaked access: %d %s", fakeMe.Code, fakeMe.Body.String())
 	}
 }
 
@@ -445,21 +483,9 @@ func TestPhaseTwoInteractions(t *testing.T) {
 		t.Fatalf("comments list failed: %d %s", comments.Code, comments.Body.String())
 	}
 
-	game := httptest.NewRecorder()
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	_ = writer.WriteField("title", "新游戏")
-	_ = writer.WriteField("summary", "测试游戏")
-	_ = writer.WriteField("engine", "Godot 4")
-	_ = writer.WriteField("genre", "Puzzle")
-	_ = writer.WriteField("license", "MIT")
-	_ = writer.Close()
-	request = httptest.NewRequest(http.MethodPost, "/api/games", &body)
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Content-Type", writer.FormDataContentType())
-	handler.ServeHTTP(game, request)
-	if game.Code != http.StatusCreated || !strings.Contains(game.Body.String(), `"status":"reviewing"`) {
-		t.Fatalf("game submission failed: %d %s", game.Code, game.Body.String())
+	game, err := a.catalog.AddGame("@builder", "新游戏", "测试游戏", "Godot 4", "Puzzle", "MIT")
+	if err != nil || game.Status != "reviewing" {
+		t.Fatalf("game fixture creation failed: %+v, %v", game, err)
 	}
 }
 
@@ -549,7 +575,7 @@ func TestDeveloperCenterContracts(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/developer/me", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
 	handler.ServeHTTP(me, request)
-	if me.Code != http.StatusOK || !strings.Contains(me.Body.String(), `"name":"builder"`) || !strings.Contains(me.Body.String(), `"engines":[]`) {
+	if me.Code != http.StatusOK || !strings.Contains(me.Body.String(), `"name":"builder"`) || !strings.Contains(me.Body.String(), `"HTML5"`) || !strings.Contains(me.Body.String(), `"Godot"`) {
 		t.Fatalf("developer me failed: %d %s", me.Code, me.Body.String())
 	}
 
@@ -652,6 +678,13 @@ func TestPlayAssetRequiresPublishedGame(t *testing.T) {
 		t.Fatalf("unpublished play asset status = %d, body = %s", beforeReview.Code, beforeReview.Body.String())
 	}
 
+	publicDetailBeforeReview := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/games/"+catalog.IDString(game.ID), nil)
+	handler.ServeHTTP(publicDetailBeforeReview, request)
+	if publicDetailBeforeReview.Code != http.StatusNotFound {
+		t.Fatalf("unpublished public detail status = %d, body = %s", publicDetailBeforeReview.Code, publicDetailBeforeReview.Body.String())
+	}
+
 	playBeforeReview := httptest.NewRecorder()
 	request = httptest.NewRequest(http.MethodPost, "/api/games/"+catalog.IDString(game.ID)+"/play", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
@@ -668,6 +701,13 @@ func TestPlayAssetRequiresPublishedGame(t *testing.T) {
 	handler.ServeHTTP(afterReview, request)
 	if afterReview.Code != http.StatusOK || !strings.Contains(afterReview.Body.String(), "play") {
 		t.Fatalf("published play asset status = %d, body = %s", afterReview.Code, afterReview.Body.String())
+	}
+
+	publicDetailAfterReview := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/games/"+catalog.IDString(game.ID), nil)
+	handler.ServeHTTP(publicDetailAfterReview, request)
+	if publicDetailAfterReview.Code != http.StatusOK || !strings.Contains(publicDetailAfterReview.Body.String(), `"title":"试玩游戏"`) {
+		t.Fatalf("published public detail status = %d, body = %s", publicDetailAfterReview.Code, publicDetailAfterReview.Body.String())
 	}
 
 	playAfterReview := httptest.NewRecorder()
@@ -733,27 +773,43 @@ func TestPhaseThreeAdminControls(t *testing.T) {
 		t.Fatalf("regular user admin access status = %d, body = %s", forbidden.Code, forbidden.Body.String())
 	}
 
-	game := httptest.NewRecorder()
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	_ = writer.WriteField("title", "待审核游戏")
-	_ = writer.WriteField("summary", "待审核")
-	_ = writer.Close()
-	request = httptest.NewRequest(http.MethodPost, "/api/games", &body)
-	request.Header.Set("Authorization", "Bearer "+userToken)
-	request.Header.Set("Content-Type", writer.FormDataContentType())
-	handler.ServeHTTP(game, request)
-	if game.Code != http.StatusCreated {
-		t.Fatalf("game submission failed: %d %s", game.Code, game.Body.String())
+	game, err := a.catalog.AddGame("@member", "待审核游戏", "待审核", "HTML5", "休闲", "MIT")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	adminGames := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/admin/games?status=reviewing", nil)
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	handler.ServeHTTP(adminGames, request)
+	if adminGames.Code != http.StatusOK || !strings.Contains(adminGames.Body.String(), `"title":"待审核游戏"`) || !strings.Contains(adminGames.Body.String(), `"author":"member"`) {
+		t.Fatalf("admin games failed: %d %s", adminGames.Code, adminGames.Body.String())
 	}
 
 	review := httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodPost, "/api/admin/games/3/review", strings.NewReader(`{"status":"approved","reason":"符合要求"}`))
+	request = httptest.NewRequest(http.MethodPost, "/api/admin/games/"+catalog.IDString(game.ID)+"/review", strings.NewReader(`{"status":"rejected","reason":"源码不完整"}`))
 	request.Header.Set("Authorization", "Bearer "+adminToken)
 	request.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(review, request)
-	if review.Code != http.StatusOK || !strings.Contains(review.Body.String(), `"status":"published"`) {
-		t.Fatalf("game review failed: %d %s", review.Code, review.Body.String())
+	if review.Code != http.StatusOK || !strings.Contains(review.Body.String(), `"status":"rejected"`) || !strings.Contains(review.Body.String(), `"reason":"源码不完整"`) {
+		t.Fatalf("game rejection failed: %d %s", review.Code, review.Body.String())
+	}
+
+	developerGames := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/developer/games?status=rejected", nil)
+	request.Header.Set("Authorization", "Bearer "+userToken)
+	handler.ServeHTTP(developerGames, request)
+	if developerGames.Code != http.StatusOK || !strings.Contains(developerGames.Body.String(), `"rejectReason":"源码不完整"`) {
+		t.Fatalf("developer games missing reject reason: %d %s", developerGames.Code, developerGames.Body.String())
+	}
+
+	approve := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/admin/games/"+catalog.IDString(game.ID)+"/review", strings.NewReader(`{"status":"approved","reason":"符合要求"}`))
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(approve, request)
+	if approve.Code != http.StatusOK || !strings.Contains(approve.Body.String(), `"status":"published"`) {
+		t.Fatalf("game approval failed: %d %s", approve.Code, approve.Body.String())
 	}
 
 	ban := httptest.NewRecorder()
@@ -766,6 +822,14 @@ func TestPhaseThreeAdminControls(t *testing.T) {
 		t.Fatalf("user ban failed: %d %s", ban.Code, ban.Body.String())
 	}
 
+	adminUsers := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/admin/users?page=1&pageSize=20", nil)
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	handler.ServeHTTP(adminUsers, request)
+	if adminUsers.Code != http.StatusOK || !strings.Contains(adminUsers.Body.String(), `"email":"member@test.com"`) || !strings.Contains(adminUsers.Body.String(), `"status":"banned"`) {
+		t.Fatalf("admin users failed: %d %s", adminUsers.Code, adminUsers.Body.String())
+	}
+
 	bannedWrite := httptest.NewRecorder()
 	request = httptest.NewRequest(http.MethodPost, "/api/forum/posts", strings.NewReader(`{"title":"被禁言用户","content":"不能发","barId":1}`))
 	request.Header.Set("Authorization", "Bearer "+userToken)
@@ -775,12 +839,156 @@ func TestPhaseThreeAdminControls(t *testing.T) {
 		t.Fatalf("banned write status = %d, body = %s", bannedWrite.Code, bannedWrite.Body.String())
 	}
 
+	unban := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/admin/users/2/unban", nil)
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	handler.ServeHTTP(unban, request)
+	if unban.Code != http.StatusOK || !strings.Contains(unban.Body.String(), `"message":"已解除封禁"`) {
+		t.Fatalf("user unban failed: %d %s", unban.Code, unban.Body.String())
+	}
+
 	auditLogs := httptest.NewRecorder()
 	request = httptest.NewRequest(http.MethodGet, "/api/admin/audit-logs", nil)
 	request.Header.Set("Authorization", "Bearer "+adminToken)
 	handler.ServeHTTP(auditLogs, request)
 	if auditLogs.Code != http.StatusOK || !strings.Contains(auditLogs.Body.String(), `"audit_logs"`) && !strings.Contains(auditLogs.Body.String(), `"review_game"`) {
 		t.Fatalf("audit logs failed: %d %s", auditLogs.Code, auditLogs.Body.String())
+	}
+
+	reports := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/admin/reports?page=1&pageSize=20", nil)
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	handler.ServeHTTP(reports, request)
+	if reports.Code != http.StatusOK || !strings.Contains(reports.Body.String(), `"items":[]`) {
+		t.Fatalf("admin reports placeholder failed: %d %s", reports.Code, reports.Body.String())
+	}
+
+	resolveReport := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/admin/reports/1/resolve", nil)
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	handler.ServeHTTP(resolveReport, request)
+	if resolveReport.Code != http.StatusNotFound {
+		t.Fatalf("resolve missing report status = %d, body = %s", resolveReport.Code, resolveReport.Body.String())
+	}
+}
+
+func TestBackendCompletionContracts(t *testing.T) {
+	a := testApp()
+	handler := testHandler(a)
+	adminToken := registerTestUserWithCredentials(t, handler, "admin", "admin@test.com")
+	memberToken := registerTestUserWithCredentials(t, handler, "member", "member@test.com")
+
+	createPost := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/forum/posts", strings.NewReader(`{"title":"待审核帖子","content":"请审核","barId":1}`))
+	request.Header.Set("Authorization", "Bearer "+memberToken)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createPost, request)
+	if createPost.Code != http.StatusCreated {
+		t.Fatalf("create pending post status = %d, body = %s", createPost.Code, createPost.Body.String())
+	}
+
+	adminPosts := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/admin/posts?status=pending&page=1&pageSize=20", nil)
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	handler.ServeHTTP(adminPosts, request)
+	if adminPosts.Code != http.StatusOK || !strings.Contains(adminPosts.Body.String(), `"title":"待审核帖子"`) {
+		t.Fatalf("admin pending posts failed: %d %s", adminPosts.Code, adminPosts.Body.String())
+	}
+
+	memberAdminPosts := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/admin/posts?status=pending", nil)
+	request.Header.Set("Authorization", "Bearer "+memberToken)
+	handler.ServeHTTP(memberAdminPosts, request)
+	if memberAdminPosts.Code != http.StatusForbidden {
+		t.Fatalf("member admin posts status = %d, body = %s", memberAdminPosts.Code, memberAdminPosts.Body.String())
+	}
+
+	createReport := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/forum/reports", strings.NewReader(`{"targetType":"post","targetId":1,"reason":"spam","details":"合同测试"}`))
+	request.Header.Set("Authorization", "Bearer "+memberToken)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createReport, request)
+	if createReport.Code != http.StatusCreated || !strings.Contains(createReport.Body.String(), `"status":"pending"`) {
+		t.Fatalf("create report failed: %d %s", createReport.Code, createReport.Body.String())
+	}
+
+	dashboard := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/admin/dashboard", nil)
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	handler.ServeHTTP(dashboard, request)
+	if dashboard.Code != http.StatusOK || !strings.Contains(dashboard.Body.String(), `"reports":1`) {
+		t.Fatalf("report dashboard count failed: %d %s", dashboard.Code, dashboard.Body.String())
+	}
+
+	reportList := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/admin/reports?status=pending", nil)
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	handler.ServeHTTP(reportList, request)
+	if reportList.Code != http.StatusOK || !strings.Contains(reportList.Body.String(), `"reason":"spam"`) {
+		t.Fatalf("admin report list failed: %d %s", reportList.Code, reportList.Body.String())
+	}
+
+	resolveReport := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/admin/reports/1/resolve", strings.NewReader(`{"status":"resolved","resolution":"已核查"}`))
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(resolveReport, request)
+	if resolveReport.Code != http.StatusOK || !strings.Contains(resolveReport.Body.String(), `"status":"resolved"`) {
+		t.Fatalf("resolve report failed: %d %s", resolveReport.Code, resolveReport.Body.String())
+	}
+
+	resolveAgain := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/admin/reports/1/resolve", nil)
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	handler.ServeHTTP(resolveAgain, request)
+	if resolveAgain.Code != http.StatusConflict {
+		t.Fatalf("duplicate report resolution status = %d, body = %s", resolveAgain.Code, resolveAgain.Body.String())
+	}
+
+	updateProfile := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPut, "/api/developer/me", strings.NewReader(`{"bio":"独立开发者","location":"上海","engines":["Godot 4","Unity","godot 4"]}`))
+	request.Header.Set("Authorization", "Bearer "+memberToken)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(updateProfile, request)
+	if updateProfile.Code != http.StatusOK || !strings.Contains(updateProfile.Body.String(), `"bio":"独立开发者"`) || !strings.Contains(updateProfile.Body.String(), `"location":"上海"`) {
+		t.Fatalf("profile update failed: %d %s", updateProfile.Code, updateProfile.Body.String())
+	}
+	if strings.Count(updateProfile.Body.String(), `"Godot 4"`) != 1 {
+		t.Fatalf("profile engines were not normalized: %s", updateProfile.Body.String())
+	}
+
+	game, err := a.catalog.AddGame("@member", "可编辑作品", "简介", "HTML5", "休闲", "MIT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateReviewing := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPatch, "/api/developer/games/"+catalog.IDString(game.ID), strings.NewReader(`{"title":"不应修改"}`))
+	request.Header.Set("Authorization", "Bearer "+memberToken)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(updateReviewing, request)
+	if updateReviewing.Code != http.StatusConflict {
+		t.Fatalf("reviewing game update status = %d, body = %s", updateReviewing.Code, updateReviewing.Body.String())
+	}
+
+	otherOwner := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPatch, "/api/developer/games/"+catalog.IDString(game.ID), strings.NewReader(`{"title":"越权修改"}`))
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(otherOwner, request)
+	if otherOwner.Code != http.StatusForbidden {
+		t.Fatalf("non-owner game update status = %d, body = %s", otherOwner.Code, otherOwner.Body.String())
+	}
+
+	if _, err := a.catalog.ReviewGame(game.ID, "rejected", "需要补充说明"); err != nil {
+		t.Fatal(err)
+	}
+	updateRejected := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPatch, "/api/developer/games/"+catalog.IDString(game.ID), strings.NewReader(`{"title":"已修改作品","description":"详细介绍"}`))
+	request.Header.Set("Authorization", "Bearer "+memberToken)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(updateRejected, request)
+	if updateRejected.Code != http.StatusOK || !strings.Contains(updateRejected.Body.String(), `"title":"已修改作品"`) {
+		t.Fatalf("rejected game update failed: %d %s", updateRejected.Code, updateRejected.Body.String())
 	}
 }
 
@@ -804,8 +1012,29 @@ func TestGameUploadRejectsInvalidFileBeforeScan(t *testing.T) {
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusUnprocessableEntity || !strings.Contains(recorder.Body.String(), "package file type is not allowed") {
+	if recorder.Code != http.StatusUnprocessableEntity || !strings.Contains(recorder.Body.String(), "coverFile: file is required") {
 		t.Fatalf("invalid upload status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestGameUploadRequiresCoverAndBuild(t *testing.T) {
+	a := testApp()
+	handler := testHandler(a)
+	token := registerTestUser(t, handler)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("title", "缺少文件")
+	_ = writer.WriteField("summary", "缺少必需文件")
+	_ = writer.Close()
+
+	request := httptest.NewRequest(http.MethodPost, "/api/games", &body)
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnprocessableEntity || !strings.Contains(recorder.Body.String(), `"errorCode":"VALIDATION_ERROR"`) || !strings.Contains(recorder.Body.String(), "coverFile: file is required") {
+		t.Fatalf("required upload status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 

@@ -12,12 +12,13 @@ const emit = defineEmits(['play', 'source']);
 <template>
   <article class="game-card" @click="emit('play', game)">
     <div class="game-cover" :class="`cover-${game.cover}`">
+      <img v-if="game.coverUrl" class="cover-img" :src="game.coverUrl" :alt="game.title">
       <div class="game-badges">
         <span v-if="game.badge === 'new'" class="badge new">NEW</span>
         <span v-if="game.badge === 'hot'" class="badge hot">HOT</span>
         <span v-if="game.badge === 'open'" class="badge open">开源</span>
       </div>
-      <span class="glyph">{{ game.glyph }}</span>
+      <span v-if="!game.coverUrl" class="glyph">{{ game.glyph }}</span>
     </div>
     <div class="game-info">
       <div class="game-title">

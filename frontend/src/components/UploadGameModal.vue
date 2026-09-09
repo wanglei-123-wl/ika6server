@@ -10,6 +10,10 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  progress: {
+    type: Object,
+    default: () => ({ percent: 0, loaded: 0, total: 0, stage: '', phase: 'uploading' }),
+  },
 });
 
 const emit = defineEmits(['close', 'submit']);
@@ -48,6 +52,12 @@ function readableSize(file) {
   if (!file) return '';
   if (file.size >= 1024 * 1024) return `${(file.size / 1024 / 1024).toFixed(1)} MB`;
   return `${Math.max(1, Math.round(file.size / 1024))} KB`;
+}
+
+function readableBytes(value) {
+  if (!value) return '0.0 MB';
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(value / 1024))} KB`;
 }
 
 function setFile(field, event) {
@@ -196,6 +206,20 @@ function submit() {
             <div class="s">{{ form.sourceFile ? readableSize(form.sourceFile) : '源码公开时使用 · 最大 300 MB' }}</div>
             <span v-if="errors.sourceFile" class="auth-error">{{ errors.sourceFile }}</span>
           </label>
+        </div>
+
+        <div v-if="submitting" class="upload-progress">
+          <div class="up-row">
+            <span class="up-label">{{ progress.stage || '正在上传游戏文件...' }}</span>
+            <span class="up-pct">{{ Math.round(progress.percent || 0) }}%</span>
+          </div>
+          <div class="up-bar">
+            <div class="up-fill" :style="{ width: `${Math.round(progress.percent || 0)}%` }"></div>
+          </div>
+          <div class="up-sub">
+            <span>{{ readableBytes(progress.loaded) }} / {{ progress.total ? readableBytes(progress.total) : '计算中' }}</span>
+            <span>{{ progress.phase === 'processing' ? '服务器处理中' : progress.percent >= 100 ? '完成' : '文件上传中' }}</span>
+          </div>
         </div>
       </div>
 

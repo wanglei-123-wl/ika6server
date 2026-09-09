@@ -6,19 +6,20 @@ import (
 )
 
 type Config struct {
-	Addr                  string
-	DatabaseURL           string
-	MigrationsDir         string
-	BootstrapAdminAccount string
-	UploadDir             string
-	TempDir               string
-	PlayDir               string
-	TokenSecret           string
-	ClamScanBin           string
-	ClamAVDBDir           string
-	SevenZipBin           string
-	YaraBin               string
-	YaraRules             string
+	Addr              string
+	DatabaseURL       string
+	MigrationsDir     string
+	AdminAccount      string
+	AdminPasswordHash string
+	UploadDir         string
+	TempDir           string
+	PlayDir           string
+	TokenSecret       string
+	ClamScanBin       string
+	ClamAVDBDir       string
+	SevenZipBin       string
+	YaraBin           string
+	YaraRules         string
 }
 
 func Load() Config {
@@ -26,19 +27,20 @@ func Load() Config {
 	root := env("IKA6_ROOT", ".")
 
 	return Config{
-		Addr:                  addr,
-		DatabaseURL:           os.Getenv("IKA6_DATABASE_URL"),
-		MigrationsDir:         env("IKA6_MIGRATIONS_DIR", filepath.Join(root, "migrations")),
-		BootstrapAdminAccount: os.Getenv("IKA6_BOOTSTRAP_ADMIN_ACCOUNT"),
-		UploadDir:             env("IKA6_UPLOAD_DIR", filepath.Join(root, "..", "storage", "uploads")),
-		TempDir:               env("IKA6_TEMP_DIR", filepath.Join(root, "..", "storage", "tmp")),
-		PlayDir:               env("IKA6_PLAY_DIR", filepath.Join(root, "..", "storage", "play")),
-		TokenSecret:           env("IKA6_TOKEN_SECRET", "dev-secret-change-me"),
-		ClamScanBin:           env("IKA6_CLAMSCAN_BIN", `C:\Program Files\ClamAV\clamscan.exe`),
-		ClamAVDBDir:           env("IKA6_CLAMAV_DB_DIR", filepath.Join(root, "..", "storage", "clamav-db")),
-		SevenZipBin:           env("IKA6_7ZIP_BIN", `C:\Program Files\7-Zip\7z.exe`),
-		YaraBin:               env("IKA6_YARA_BIN", `C:\Users\Administrator\AppData\Local\Microsoft\WinGet\Packages\VirusTotal.YARA_Microsoft.Winget.Source_8wekyb3d8bbwe\yara64.exe`),
-		YaraRules:             env("IKA6_YARA_RULES", filepath.Join(root, "..", "deployments", "yara", "source_rules.yar")),
+		Addr:              addr,
+		DatabaseURL:       os.Getenv("IKA6_DATABASE_URL"),
+		MigrationsDir:     env("IKA6_MIGRATIONS_DIR", filepath.Join(root, "migrations")),
+		AdminAccount:      os.Getenv("IKA6_ADMIN_ACCOUNT"),
+		AdminPasswordHash: os.Getenv("IKA6_ADMIN_PASSWORD_HASH"),
+		UploadDir:         env("IKA6_UPLOAD_DIR", filepath.Join(root, "..", "storage", "uploads")),
+		TempDir:           env("IKA6_TEMP_DIR", filepath.Join(root, "..", "storage", "tmp")),
+		PlayDir:           env("IKA6_PLAY_DIR", filepath.Join(root, "..", "storage", "play")),
+		TokenSecret:       env("IKA6_TOKEN_SECRET", "dev-secret-change-me"),
+		ClamScanBin:       env("IKA6_CLAMSCAN_BIN", `C:\Program Files\ClamAV\clamscan.exe`),
+		ClamAVDBDir:       env("IKA6_CLAMAV_DB_DIR", filepath.Join(root, "..", "storage", "clamav-db")),
+		SevenZipBin:       env("IKA6_7ZIP_BIN", `C:\Program Files\7-Zip\7z.exe`),
+		YaraBin:           env("IKA6_YARA_BIN", `C:\Users\Administrator\AppData\Local\Microsoft\WinGet\Packages\VirusTotal.YARA_Microsoft.Winget.Source_8wekyb3d8bbwe\yara64.exe`),
+		YaraRules:         env("IKA6_YARA_RULES", filepath.Join(root, "..", "deployments", "yara", "source_rules.yar")),
 	}
 }
 

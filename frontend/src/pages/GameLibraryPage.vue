@@ -20,7 +20,10 @@ const emit = defineEmits(['play-game', 'download-source']);
     </div>
     <div v-if="games.length" class="container library-list">
       <div v-for="game in games" :key="game.title" class="list-row" @click="emit('play-game', game)">
-        <div class="list-cover"><span>{{ game.glyph }}</span></div>
+        <div class="list-cover">
+          <img v-if="game.coverUrl" class="cover-img" :src="game.coverUrl" :alt="game.title">
+          <span v-else>{{ game.glyph }}</span>
+        </div>
         <div class="list-info">
           <div class="list-title">{{ game.title }} <span v-if="game.hasSource" class="src-tag">SRC</span></div>
           <div class="list-desc">{{ game.engine }} 引擎 · {{ game.genre }} · {{ game.license }} 协议 · 由 {{ game.author }} 发布。</div>

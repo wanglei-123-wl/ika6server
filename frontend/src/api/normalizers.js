@@ -1,3 +1,5 @@
+import { resolveApiAssetUrl } from './http';
+
 function pick(source, keys, fallback = undefined) {
   for (const key of keys) {
     if (source?.[key] !== undefined && source?.[key] !== null) return source[key];
@@ -66,13 +68,14 @@ export function normalizeAuthResult(raw = {}) {
 export function normalizeGame(raw = {}) {
   const title = pick(raw, ['title', 'name', 'gameName', 'game_name'], '未命名游戏');
   const sourceUrl = pick(raw, ['sourceUrl', 'source_url', 'downloadUrl', 'download_url'], '');
+  const coverUrl = pick(raw, ['coverUrl', 'cover_url', 'coverImage'], '');
 
   return {
     id: pick(raw, ['id', 'gameId', 'game_id', 'slug'], title),
     title,
     glyph: pick(raw, ['glyph', 'icon', 'mark'], '◆'),
     cover: Number(pick(raw, ['cover', 'coverIndex', 'cover_index'], 1)),
-    coverUrl: pick(raw, ['coverUrl', 'cover_url', 'coverImage'], ''),
+    coverUrl: resolveApiAssetUrl(coverUrl),
     badge: pick(raw, ['badge', 'tag', 'statusBadge'], ''),
     author: pick(raw, ['author', 'authorName', 'author_name', 'publisher'], '@unknown'),
     engine: pick(raw, ['engine', 'engineName', 'engine_name'], '未知引擎'),

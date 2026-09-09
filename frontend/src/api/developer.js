@@ -1,4 +1,4 @@
-import { request } from './http';
+import { request, resolveApiAssetUrl } from './http';
 
 function pick(source, keys, fallback = undefined) {
   for (const key of keys) {
@@ -31,7 +31,7 @@ function normalizeProfile(raw = {}, fallbackUser = null) {
     id: pick(raw, ['id', 'userId', 'user_id'], fallbackUser?.id || ''),
     name,
     initial: pick(raw, ['initial', 'avatarText', 'avatar_text'], fallbackUser?.initial || String(name).charAt(0).toUpperCase() || 'U'),
-    avatarUrl: pick(raw, ['avatarUrl', 'avatar_url', 'avatar'], fallbackUser?.avatar || ''),
+    avatarUrl: resolveApiAssetUrl(pick(raw, ['avatarUrl', 'avatar_url', 'avatar'], fallbackUser?.avatar || '')),
     level: pick(raw, ['level', 'rank'], fallbackUser?.level || 'lv1'),
     verified: Boolean(pick(raw, ['verified', 'isVerified', 'is_verified'], true)),
     bio: pick(raw, ['bio', 'description', 'summary'], ''),
@@ -42,19 +42,34 @@ function normalizeProfile(raw = {}, fallbackUser = null) {
 }
 
 function normalizeStats(raw = {}) {
+  const following = pick(raw, ['following', 'followings', 'followingCount', 'following_count'], null);
+  const followers = pick(raw, ['followers', 'followerCount', 'follower_count'], null);
+  const sponsorIncome = pick(raw, ['sponsorIncome', 'sponsor_income', 'income', 'revenue'], null);
+  const weeklyNewFollowers = pick(raw, ['weeklyNewFollowers', 'weekly_new_followers', 'newFollowers', 'new_followers'], null);
+  const trends = [
+    pick(raw, ['playTrend', 'play_trend'], ''),
+    pick(raw, ['downloadTrend', 'download_trend'], ''),
+    pick(raw, ['likeTrend', 'like_trend'], ''),
+    pick(raw, ['incomeTrend', 'income_trend'], ''),
+  ];
+  const advancedStatsAvailable = [following, followers, sponsorIncome, weeklyNewFollowers]
+    .some((value) => value !== null && value !== undefined && value !== '' && Number(value) !== 0)
+    || trends.some(Boolean);
+  const advancedFallback = advancedStatsAvailable ? '0' : '—';
+
   return {
-    following: formatCount(pick(raw, ['following', 'followings', 'followingCount', 'following_count'], 0)),
-    followers: formatCount(pick(raw, ['followers', 'followerCount', 'follower_count'], 0)),
+    following: formatCount(following, advancedFallback),
+    followers: formatCount(followers, advancedFallback),
     totalLikes: formatCount(pick(raw, ['totalLikes', 'total_likes', 'likes', 'likeCount', 'like_count'], 0)),
     works: Number(pick(raw, ['works', 'workCount', 'work_count', 'games', 'gameCount', 'game_count'], 0)),
     totalPlays: formatCount(pick(raw, ['totalPlays', 'total_plays', 'plays', 'playCount', 'play_count'], 0)),
     totalDownloads: formatCount(pick(raw, ['totalDownloads', 'total_downloads', 'downloads', 'downloadCount', 'download_count'], 0)),
-    sponsorIncome: formatCount(pick(raw, ['sponsorIncome', 'sponsor_income', 'income', 'revenue'], 0)),
-    weeklyNewFollowers: formatCount(pick(raw, ['weeklyNewFollowers', 'weekly_new_followers', 'newFollowers', 'new_followers'], 0)),
-    playTrend: pick(raw, ['playTrend', 'play_trend'], ''),
-    downloadTrend: pick(raw, ['downloadTrend', 'download_trend'], ''),
-    likeTrend: pick(raw, ['likeTrend', 'like_trend'], ''),
-    incomeTrend: pick(raw, ['incomeTrend', 'income_trend'], ''),
+    sponsorIncome: formatCount(sponsorIncome, advancedFallback),
+    weeklyNewFollowers: formatCount(weeklyNewFollowers, advancedFallback),
+    playTrend: trends[0],
+    downloadTrend: trends[1],
+    likeTrend: trends[2],
+    incomeTrend: trends[3],
   };
 }
 
@@ -67,7 +82,7 @@ function normalizeWork(raw = {}) {
     title,
     glyph: pick(raw, ['glyph', 'icon', 'mark'], '◆'),
     cover: Number(pick(raw, ['cover', 'coverIndex', 'cover_index'], 1)),
-    coverUrl: pick(raw, ['coverUrl', 'cover_url', 'coverImage'], ''),
+    coverUrl: resolveApiAssetUrl(pick(raw, ['coverUrl', 'cover_url', 'coverImage'], '')),
     status,
     genre: pick(raw, ['genre', 'category', 'type'], '其他'),
     engine: pick(raw, ['engine', 'engineName', 'engine_name'], '未知引擎'),

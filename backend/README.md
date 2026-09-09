@@ -28,7 +28,8 @@ go run .\cmd\api
 IKA6_ADDR=0.0.0.0:8080
 IKA6_DATABASE_URL=postgres://user:password@localhost:5432/ika6
 IKA6_MIGRATIONS_DIR=F:\ika6server\backend\migrations
-IKA6_BOOTSTRAP_ADMIN_ACCOUNT=admin@example.com
+IKA6_ADMIN_ACCOUNT=yaochenAi.18700021044.com@#$%
+IKA6_ADMIN_PASSWORD_HASH=replace-with-output-of-go-run-cmd-hash-password
 IKA6_UPLOAD_DIR=F:\ika6server\storage\uploads
 IKA6_TEMP_DIR=F:\ika6server\storage\tmp
 IKA6_PLAY_DIR=F:\ika6server\storage\play
@@ -50,7 +51,15 @@ $env:IKA6_DATABASE_URL="postgres://ika6:ika6-local-password@localhost:5432/ika6"
 go run .\cmd\migrate
 ```
 
-The API also applies pending migrations during startup when `IKA6_DATABASE_URL` is configured. The PostgreSQL integration test is skipped when that variable is absent:
+The API applies pending migrations during startup. `IKA6_DATABASE_URL`, `IKA6_TOKEN_SECRET`, `IKA6_ADMIN_ACCOUNT`, and `IKA6_ADMIN_PASSWORD_HASH` are required for API startup; the backend no longer falls back to in-memory storage in `cmd/api`.
+
+Generate the administrator password hash with:
+
+```powershell
+go run .\cmd\hash-password your-password
+```
+
+The PostgreSQL integration test is skipped when `IKA6_DATABASE_URL` is absent:
 
 ```powershell
 go test .\internal\database -run TestPostgresIntegration
@@ -81,11 +90,11 @@ To verify that the database path is reachable:
 .\scripts\verify-postgres.ps1
 ```
 
-If the API is started with plain `go run .\cmd\api` and `IKA6_DATABASE_URL` is not set in that same shell/process, the backend intentionally falls back to in-memory development stores.
+If the API is started with plain `go run .\cmd\api`, set the required environment variables in that same shell/process first.
 
 ## Current Status
 
-The backend supports PostgreSQL persistence when `IKA6_DATABASE_URL` is configured. Without that variable, it uses in-memory stores so the API shape can still be tested during development.
+The backend requires PostgreSQL persistence for `cmd/api` startup. In-memory stores remain only for unit tests and isolated package-level development.
 
 Uploaded files are written to a temporary directory, scanned with ClamAV and optional YARA rules, then moved into the upload directory only when the scan is clean. Archive uploads are extracted with 7-Zip into a temporary scan directory and scanned recursively before approval.
 

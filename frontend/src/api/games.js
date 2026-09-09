@@ -1,54 +1,27 @@
 import { request } from './http';
-import {
-  mockGetGameDetail,
-  mockGetGameSource,
-  mockGetGames,
-  mockLikeGame,
-  mockSubmitGame,
-  mockTrackGamePlay,
-} from './mockAdapter';
 import { normalizeDownload, normalizeGame, normalizePage } from './normalizers';
-import { requestWithFallback } from './runtime';
 
 export async function getGameList(params) {
-  const result = await requestWithFallback(
-    () => request('/api/games', { params }),
-    () => mockGetGames(params),
-  );
+  const result = await request('/api/games', { params });
   return normalizePage(result, normalizeGame);
 }
 
 export async function getGameDetail(id) {
-  return normalizeGame(await requestWithFallback(
-    () => request(`/api/games/${id}`),
-    () => mockGetGameDetail(id),
-  ));
+  return normalizeGame(await request(`/api/games/${id}`));
 }
 
 export async function likeGame(id) {
-  return normalizeGame(await requestWithFallback(
-    () => request(`/api/games/${id}/like`, { method: 'POST' }),
-    () => mockLikeGame(id),
-  ));
+  return normalizeGame(await request(`/api/games/${id}/like`, { method: 'POST' }));
 }
 
 export function trackGamePlay(id) {
-  return requestWithFallback(
-    () => request(`/api/games/${id}/play`, { method: 'POST' }),
-    () => mockTrackGamePlay(id),
-  );
+  return request(`/api/games/${id}/play`, { method: 'POST' });
 }
 
 export async function getGameSource(id) {
-  return normalizeDownload(await requestWithFallback(
-    () => request(`/api/games/${id}/download-source`),
-    () => mockGetGameSource(id),
-  ));
+  return normalizeDownload(await request(`/api/games/${id}/download-source`));
 }
 
 export async function submitGame(payload) {
-  return normalizeGame(await requestWithFallback(
-    () => request('/api/games', { method: 'POST', body: payload }),
-    () => mockSubmitGame(payload),
-  ));
+  return normalizeGame(await request('/api/games', { method: 'POST', body: payload }));
 }

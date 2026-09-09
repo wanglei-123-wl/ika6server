@@ -30,14 +30,14 @@ const actionLoadingId = ref('');
 const errorText = ref('');
 const profile = ref(null);
 const stats = ref({
-  following: '0',
-  followers: '0',
+  following: '—',
+  followers: '—',
   totalLikes: '0',
   works: 0,
   totalPlays: '0',
   totalDownloads: '0',
-  sponsorIncome: '0',
-  weeklyNewFollowers: '0',
+  sponsorIncome: '—',
+  weeklyNewFollowers: '—',
 });
 const works = ref([]);
 
@@ -56,21 +56,6 @@ const docGroups = [
   { title: '进阶', keys: ['sdk', 'monetize', 'tips'] },
 ];
 
-const fallbackDocs = {
-  monetize: {
-    title: '免费变现（赞助）',
-    sub: '开源项目如何体面地获得支持',
-    steps: ['开启吧内赞助', '赞助打榜', '收益归开发者'],
-    code: '赞助功能接通后，会在作品管理页展示收入、支持者与提现记录。',
-  },
-  tips: {
-    title: '最佳实践',
-    sub: '让玩家更容易理解、试玩和反馈你的作品',
-    steps: ['标题说明游戏类型', '封面展示真实画面', '附上玩法说明和源码协议'],
-    code: 'README.md\nLICENSE\nscreenshots/\ncontrols.md',
-  },
-};
-
 const statusMeta = {
   published: { label: '已发布', className: 'published' },
   reviewing: { label: '审核中', className: 'reviewing' },
@@ -79,7 +64,7 @@ const statusMeta = {
   offline: { label: '已下架', className: 'draft' },
 };
 
-const docs = computed(() => ({ ...fallbackDocs, ...props.devDocs }));
+const docs = computed(() => props.devDocs || {});
 const currentDoc = computed(() => docs.value[props.activeDocKey] || {
   title: '内容加载中',
   sub: '正在读取开发者中心内容。',
@@ -279,7 +264,6 @@ watch(() => props.refreshKey, loadCenter);
           </div>
           <div class="pb-actions">
             <button class="btn btn-primary" type="button" @click="requestUpload"><span>＋</span>上传新作品</button>
-            <button class="btn btn-ghost" type="button" @click="notice('资料编辑接口接通后即可开放')">编辑资料</button>
           </div>
         </div>
       </div>
@@ -331,14 +315,12 @@ watch(() => props.refreshKey, loadCenter);
               </template>
               <div v-else-if="work.status === 'rejected'" class="wk-reason"><b>驳回原因：</b>{{ work.reason || '后端暂未返回驳回原因' }}</div>
               <div v-else class="wk-eta">{{ work.date ? formatWorkDate(work.date) : '未发布' }} · 上传未完成</div>
-              <div class="wk-actions">
-                <button v-if="work.status === 'published'" class="btn btn-ghost" type="button" @click="emit('play-game', work)">查看</button>
-                <button v-if="work.status === 'published'" class="btn btn-ghost" type="button" @click="notice('作品编辑接口接通后即可开放')">管理</button>
-                <button v-if="work.status === 'reviewing'" class="btn btn-ghost" type="button" :disabled="actionLoadingId === `urge-${work.id}`" @click="urgeReview(work)">催审</button>
-                <button v-if="work.status === 'rejected'" class="btn btn-primary" type="button" :disabled="actionLoadingId === `resubmit-${work.id}`" @click="resubmitWork(work)">重新提交</button>
-                <button v-if="work.status === 'draft'" class="btn btn-primary" type="button" @click="requestUpload">继续编辑</button>
-                <button v-if="canDeleteWork(work)" class="btn btn-danger-soft" type="button" :disabled="actionLoadingId === `delete-${work.id}`" @click="deleteWork(work)">删除</button>
-              </div>
+                <div class="wk-actions">
+                 <button v-if="work.status === 'published'" class="btn btn-ghost" type="button" @click="emit('play-game', work)">查看</button>
+                 <button v-if="work.status === 'reviewing'" class="btn btn-ghost" type="button" :disabled="actionLoadingId === `urge-${work.id}`" @click="urgeReview(work)">催审</button>
+                 <button v-if="work.status === 'rejected'" class="btn btn-primary" type="button" :disabled="actionLoadingId === `resubmit-${work.id}`" @click="resubmitWork(work)">重新提交</button>
+                 <button v-if="canDeleteWork(work)" class="btn btn-danger-soft" type="button" :disabled="actionLoadingId === `delete-${work.id}`" @click="deleteWork(work)">删除</button>
+                </div>
             </div>
           </article>
         </div>

@@ -14,10 +14,6 @@ export class ApiError extends Error {
   }
 }
 
-export function isMockEnabled() {
-  return false;
-}
-
 export function getAuthToken() {
   return window.localStorage.getItem(TOKEN_KEY) || window.sessionStorage.getItem(TOKEN_KEY);
 }
@@ -52,6 +48,12 @@ function buildUrl(path, params) {
   });
 
   return url.toString();
+}
+
+export function resolveApiAssetUrl(path) {
+  if (!path) return '';
+  if (/^(https?:|data:|blob:)/i.test(path)) return path;
+  return new URL(path, API_BASE_URL || window.location.origin).toString();
 }
 
 function normalizePayload(payload) {

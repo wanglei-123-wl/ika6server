@@ -30,6 +30,7 @@ const showRegisterPassword = ref(false);
 const showRegisterPasswordConfirm = ref(false);
 const errors = ref({});
 const loading = ref(false);
+const platformAdminAccount = 'yaochenAi.18700021044.com@#$%';
 
 function reset() {
   tab.value = props.defaultTab;
@@ -62,6 +63,10 @@ function switchTab(nextTab) {
 
 function isValidAccount(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) || /^1[3-9]\d{9}$/.test(value);
+}
+
+function isValidLoginAccount(value) {
+  return value === platformAdminAccount || isValidAccount(value);
 }
 
 function applyServerError(error, mode) {
@@ -99,7 +104,7 @@ async function submitLogin() {
   const nextErrors = {};
   const account = loginAccount.value.trim();
 
-  if (!isValidAccount(account)) nextErrors.loginAccount = '请输入有效的邮箱或手机号';
+  if (!isValidLoginAccount(account)) nextErrors.loginAccount = '请输入有效的邮箱或手机号';
   if (loginPassword.value.length < 8) nextErrors.loginPassword = '密码至少 8 位';
 
   errors.value = nextErrors;
