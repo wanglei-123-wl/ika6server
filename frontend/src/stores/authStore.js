@@ -4,7 +4,6 @@ import { getAuthToken, getAuthTokenPersistence } from '../api/http';
 
 const USER_CACHE_KEY = 'ika6_current_user';
 const LEGACY_USER_CACHE_KEY = 'pf_user';
-const PLATFORM_ADMIN_ACCOUNT = 'yaochenAi.18700021044.com.yc';
 
 const state = reactive({
   user: null,
@@ -49,16 +48,12 @@ async function runAuthAction(action, { persist = true } = {}) {
   }
 }
 
-function normalizeAccount(value) {
-  return String(value || '').trim();
-}
-
-function withAdminAccess(user, account = '') {
+function withAdminAccess(user) {
   if (!user) return user;
 
   return {
     ...user,
-    adminAccess: user.role === 'admin' && normalizeAccount(account) === PLATFORM_ADMIN_ACCOUNT,
+    adminAccess: user.role === 'admin',
   };
 }
 
@@ -79,8 +74,7 @@ export function useAuthStore() {
 
     try {
       const user = await getCurrentUser();
-      state.user = withAdminAccess(user, state.user?.adminAccount);
-      if (state.user?.adminAccess) state.user.adminAccount = state.user.adminAccount || PLATFORM_ADMIN_ACCOUNT;
+      state.user = withAdminAccess(user);
       cacheUser(state.user, { persist: tokenPersistence !== 'session' });
     } catch {
       state.user = null;
@@ -92,8 +86,7 @@ export function useAuthStore() {
 
   async function loginWithPassword(payload) {
     const result = await runAuthAction(() => login(payload), { persist: payload.remember !== false });
-    state.user = withAdminAccess(result.user || result, payload.account);
-    if (state.user?.adminAccess) state.user.adminAccount = normalizeAccount(payload.account);
+    state.user = withAdminAccess(result.user || result);
     cacheUser(state.user, { persist: payload.remember !== false });
     return { ...result, user: state.user };
   }
