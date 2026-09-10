@@ -141,3 +141,14 @@ export function urgeDeveloperGameReview(id) {
 export function deleteDeveloperGame(id) {
   return request(`/api/developer/games/${id}`, { method: 'DELETE' });
 }
+
+export async function updateDeveloperProfile(payload) {
+  return normalizeProfile(await request('/api/developer/me', { method: 'PUT', body: payload }));
+}
+
+export async function uploadDeveloperAvatar(file) {
+  const formData = new FormData();
+  formData.append('avatarFile', file);
+  const result = await request('/api/developer/avatar', { method: 'POST', body: formData });
+  return resolveApiAssetUrl(pick(result, ['avatarUrl', 'avatar_url'], ''));
+}

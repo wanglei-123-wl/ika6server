@@ -124,6 +124,8 @@ export function normalizeBar(raw = {}) {
     desc: pick(raw, ['desc', 'description', 'summary'], ''),
     posts: formatCount(pick(raw, ['posts', 'postCount', 'post_count'], 0)),
     members: formatCount(pick(raw, ['members', 'memberCount', 'member_count'], 0)),
+    online: formatCount(pick(raw, ['online', 'onlineCount', 'online_count'], 0)),
+    moderators: formatCount(pick(raw, ['moderators', 'moderatorCount', 'moderator_count'], 0)),
     hot: Boolean(pick(raw, ['hot', 'isHot', 'is_hot'], false)),
   };
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/wanglei-123-wl/ika6server/backend/internal/catalog"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/config"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/database"
+	fileStore "github.com/wanglei-123-wl/ika6server/backend/internal/files"
 	playdeploy "github.com/wanglei-123-wl/ika6server/backend/internal/play"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/posts"
 	"github.com/wanglei-123-wl/ika6server/backend/internal/reports"
@@ -28,12 +29,14 @@ import (
 
 func testApp() *app {
 	userStore := users.NewStoreWithAdmin("admin@test.com")
+	uploadDir := os.TempDir()
 	return &app{
-		config:      config.Config{TokenSecret: "test-secret"},
+		config:      config.Config{TokenSecret: "test-secret", UploadDir: uploadDir},
 		database:    &database.Database{},
 		users:       userStore,
 		auth:        auth.NewService(userStore, "test-secret"),
 		posts:       posts.NewStore(),
+		files:       fileStore.NewStore(uploadDir, uploadDir, nil, nil, nil),
 		play:        playdeploy.NewService(""),
 		auditLog:    audit.NewMemoryLogger(),
 		catalog:     catalog.NewStore(),
@@ -486,6 +489,21 @@ func TestPhaseTwoInteractions(t *testing.T) {
 		t.Fatalf("forum like failed: %d %s", postLike.Code, postLike.Body.String())
 	}
 
+	filteredPosts := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/forum/posts?cat=交流&barId=1", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(filteredPosts, request)
+	if filteredPosts.Code != http.StatusOK || !strings.Contains(filteredPosts.Body.String(), `"title":"新帖"`) || !strings.Contains(filteredPosts.Body.String(), `"liked":true`) {
+		t.Fatalf("filtered forum posts missing liked post: %d %s", filteredPosts.Code, filteredPosts.Body.String())
+	}
+
+	emptyFilteredPosts := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/forum/posts?cat=互助&barId=1", nil)
+	handler.ServeHTTP(emptyFilteredPosts, request)
+	if emptyFilteredPosts.Code != http.StatusOK || strings.Contains(emptyFilteredPosts.Body.String(), `"title":"新帖"`) {
+		t.Fatalf("forum posts were not filtered server-side: %d %s", emptyFilteredPosts.Code, emptyFilteredPosts.Body.String())
+	}
+
 	reply := httptest.NewRecorder()
 	request = httptest.NewRequest(http.MethodPost, "/api/forum/posts/2/replies", strings.NewReader(`{"content":"支持一下"}`))
 	request.Header.Set("Authorization", "Bearer "+token)
@@ -834,6 +852,13 @@ func TestGameSourceRequiresPublishedGame(t *testing.T) {
 	if _, err := a.catalog.ReviewGame(game.ID, "approved"); err != nil {
 		t.Fatal(err)
 	}
+	directSource := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/games/"+catalog.IDString(game.ID)+"/files/source", nil)
+	handler.ServeHTTP(directSource, request)
+	if directSource.Code != http.StatusUnauthorized {
+		t.Fatalf("direct source without token status = %d, body = %s", directSource.Code, directSource.Body.String())
+	}
+
 	afterReview := httptest.NewRecorder()
 	request = httptest.NewRequest(http.MethodGet, "/api/games/"+catalog.IDString(game.ID)+"/download-source", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
@@ -975,16 +1000,40 @@ func TestBackendCompletionContracts(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer "+memberToken)
 	request.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(createPost, request)
-	if createPost.Code != http.StatusCreated {
-		t.Fatalf("create pending post status = %d, body = %s", createPost.Code, createPost.Body.String())
+	if createPost.Code != http.StatusCreated || !strings.Contains(createPost.Body.String(), `"status":"published"`) {
+		t.Fatalf("create published post status = %d, body = %s", createPost.Code, createPost.Body.String())
+	}
+	var postEnvelope struct {
+		Data struct {
+			ID int64 `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(createPost.Body.Bytes(), &postEnvelope); err != nil {
+		t.Fatal(err)
+	}
+
+	publicPosts := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/forum/posts?page=1&pageSize=20", nil)
+	handler.ServeHTTP(publicPosts, request)
+	if publicPosts.Code != http.StatusOK || !strings.Contains(publicPosts.Body.String(), `"title":"待审核帖子"`) {
+		t.Fatalf("public forum posts missed created post: %d %s", publicPosts.Code, publicPosts.Body.String())
+	}
+
+	commentPost := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/forum/posts/"+catalog.IDString(postEnvelope.Data.ID)+"/comments", strings.NewReader(`{"content":"发帖后立即评论"}`))
+	request.Header.Set("Authorization", "Bearer "+memberToken)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(commentPost, request)
+	if commentPost.Code != http.StatusCreated || !strings.Contains(commentPost.Body.String(), `"content":"发帖后立即评论"`) {
+		t.Fatalf("comment on created post failed: %d %s", commentPost.Code, commentPost.Body.String())
 	}
 
 	adminPosts := httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/admin/posts?status=pending&page=1&pageSize=20", nil)
+	request = httptest.NewRequest(http.MethodGet, "/api/admin/posts?status=all&page=1&pageSize=20", nil)
 	request.Header.Set("Authorization", "Bearer "+adminToken)
 	handler.ServeHTTP(adminPosts, request)
 	if adminPosts.Code != http.StatusOK || !strings.Contains(adminPosts.Body.String(), `"title":"待审核帖子"`) {
-		t.Fatalf("admin pending posts failed: %d %s", adminPosts.Code, adminPosts.Body.String())
+		t.Fatalf("admin posts failed: %d %s", adminPosts.Code, adminPosts.Body.String())
 	}
 
 	memberAdminPosts := httptest.NewRecorder()

@@ -27,7 +27,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(['upload', 'play-game', 'source', 'like-post', 'notice', 'request-auth', 'reply-created']);
+const emit = defineEmits(['upload', 'play-game', 'source', 'like-game', 'like-post', 'notice', 'request-auth', 'reply-created']);
 
 function compact(value) {
   const number = Number(value) || 0;
@@ -84,7 +84,7 @@ const heroStats = computed(() => [
         <a class="btn btn-ghost" href="#/library">全部游戏</a>
       </div>
       <div v-if="games.length" class="games-grid">
-        <GameCard v-for="game in games.slice(0, 6)" :key="game.title" :game="game" @play="emit('play-game', $event)" @source="emit('source', $event)" />
+        <GameCard v-for="game in games.slice(0, 6)" :key="game.title" :game="game" @play="emit('play-game', $event)" @source="emit('source', $event)" @like="emit('like-game', $event)" />
       </div>
       <StateBlock v-else icon="游" title="暂无游戏数据" text="客户端已经准备好接口，等待服务端返回游戏列表。" />
     </div>

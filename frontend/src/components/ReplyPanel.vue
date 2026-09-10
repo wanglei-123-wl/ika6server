@@ -21,13 +21,18 @@ const props = defineProps({
 const emit = defineEmits(['notice', 'request-auth', 'replied']);
 
 const replies = ref([]);
+const replyPage = ref(1);
+const replyTotal = ref(0);
 const loading = ref(false);
+const loadingMore = ref(false);
 const submitting = ref(false);
 const likingReplyId = ref('');
 const error = ref('');
 const content = ref('');
 const replyTarget = ref(null);
 const loadingChildrenId = ref('');
+const childPages = ref({});
+const pageSize = 20;
 
 const composePlaceholder = computed(() => (
   replyTarget.value ? `回复 @${replyTarget.value.author}` : '写下你的评论...'
@@ -84,14 +89,40 @@ async function loadReplies() {
 
   loading.value = true;
   error.value = '';
+  replyPage.value = 1;
+  replyTotal.value = 0;
+  childPages.value = {};
 
   try {
-    const result = await getForumReplies(props.post.id, { page: 1, pageSize: 20 });
+    const result = await getForumReplies(props.post.id, { page: 1, pageSize });
     replies.value = result.items || [];
+    replyPage.value = Number(result.page || 1);
+    replyTotal.value = Number(result.total || replies.value.length);
   } catch (loadError) {
     error.value = loadError.message || '评论加载失败';
   } finally {
     loading.value = false;
+  }
+}
+
+async function loadMoreReplies() {
+  if (loadingMore.value || replies.value.length >= replyTotal.value) return;
+
+  loadingMore.value = true;
+  try {
+    const nextPage = replyPage.value + 1;
+    const result = await getForumReplies(props.post.id, { page: nextPage, pageSize });
+    const existing = new Set(replies.value.map((reply) => String(reply.id)));
+    replies.value = [
+      ...replies.value,
+      ...(result.items || []).filter((reply) => !existing.has(String(reply.id))),
+    ];
+    replyPage.value = Number(result.page || nextPage);
+    replyTotal.value = Number(result.total || replies.value.length);
+  } catch (loadError) {
+    emit('notice', loadError.message || '更多评论加载失败');
+  } finally {
+    loadingMore.value = false;
   }
 }
 
@@ -158,12 +189,18 @@ async function loadChildReplies(reply) {
 
   loadingChildrenId.value = reply.id;
   try {
-    const result = await getForumCommentReplies(reply.id, { page: 1, pageSize: 20 });
+    const key = String(reply.id);
+    const nextPage = (childPages.value[key] || 0) + 1;
+    const result = await getForumCommentReplies(reply.id, { page: nextPage, pageSize });
     updateReply(reply.id, (item) => ({
       ...item,
-      replies: result.items || [],
+      replies: [
+        ...(item.replies || []),
+        ...(result.items || []).filter((child) => !(item.replies || []).some((oldChild) => String(oldChild.id) === String(child.id))),
+      ],
       replyCount: Math.max(Number(item.replyCount || 0), Number(result.total || 0)),
     }));
+    childPages.value = { ...childPages.value, [key]: Number(result.page || nextPage) };
   } catch (loadError) {
     emit('notice', loadError.message || '二级回复加载失败');
   } finally {
@@ -257,6 +294,15 @@ onMounted(loadReplies);
             </button>
           </div>
         </article>
+        <button
+          v-if="replies.length < replyTotal"
+          class="comment-more-btn top-more"
+          type="button"
+          :disabled="loadingMore"
+          @click="loadMoreReplies"
+        >
+          {{ loadingMore ? '加载中...' : `加载更多评论（${replyTotal - replies.length}）` }}
+        </button>
       </div>
 
       <div v-else class="reply-empty">

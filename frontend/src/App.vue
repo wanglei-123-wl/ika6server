@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import CreatePostModal from './components/CreatePostModal.vue';
 import AuthModal from './components/AuthModal.vue';
 import UploadGameModal from './components/UploadGameModal.vue';
-import { AUTH_EXPIRED_EVENT, createForumPost, downloadRepo, getDevDocs, getForumBars, getForumPosts, getGameList, getGameSource, getHomeData, getRepoList, likeForumPost, searchSite, trackGamePlay, uploadGame } from './api';
+import { AUTH_EXPIRED_EVENT, createForumPost, downloadRepo, getDevDocs, getForumBars, getForumPosts, getGameList, getGameSource, getHomeData, getRepoList, likeForumPost, likeGame, searchSite, trackGamePlay, uploadForumPostFile, uploadGame } from './api';
 import AdminPage from './pages/AdminPage.vue';
 import DevPage from './pages/DevPage.vue';
 import ForumPage from './pages/ForumPage.vue';
@@ -26,7 +26,7 @@ const routes = [
 const activeView = ref('home');
 const currentPath = ref('#/');
 const activeForumCat = ref('全部');
-const activeBar = ref({ icon: '◆', name: '独立游戏吧', desc: '正在加载社区数据', posts: '0', members: '0' });
+const activeBar = ref({ icon: '◆', name: '独立游戏吧', desc: '正在加载社区数据', posts: '0', members: '0', online: '0', moderators: '0' });
 const activeDocKey = ref('quickstart');
 const uploadOpen = ref(false);
 const uploadSubmitting = ref(false);
@@ -186,12 +186,16 @@ async function submitPost(payload) {
   postSubmitting.value = true;
 
   try {
-    const post = await createForumPost({ ...payload, barId: activeBar.value.id || 1 });
+    const { files = [], ...postPayload } = payload;
+    const post = await createForumPost({ ...postPayload, barId: activeBar.value.id || 1 });
+    for (const file of files) {
+      await uploadForumPostFile(post.id, file);
+    }
     postList.value = [post, ...postList.value];
     postModalOpen.value = false;
-    showToast('帖子已发布');
+    showToast(files.length ? '帖子和附件已发布' : '帖子已发布');
   } catch {
-    showToast('发帖失败，请稍后重试');
+    showToast('发帖或附件上传失败，请稍后重试');
   } finally {
     postSubmitting.value = false;
   }
@@ -227,6 +231,42 @@ async function submitUpload(payload) {
   } finally {
     uploadSubmitting.value = false;
     uploadProgress.value = { percent: 0, loaded: 0, total: 0, stage: '' };
+  }
+}
+
+function replaceGameInList(list, gameId, patch) {
+  return list.map((item) => (String(item.id) === String(gameId) ? { ...item, ...patch } : item));
+}
+
+async function handleLikeGame(game) {
+  if (!currentUser.value) {
+    openAuth();
+    showToast('请先登录后再点赞');
+    return;
+  }
+  if (game.liked) return;
+
+  const previousLikes = Number(game.likes) || 0;
+  const optimistic = { liked: true, likes: previousLikes + 1 };
+  gameList.value = replaceGameInList(gameList.value, game.id, optimistic);
+  homeGames.value = replaceGameInList(homeGames.value, game.id, optimistic);
+  try {
+    const result = await likeGame(game.id);
+    const patch = {
+      liked: typeof result.liked === 'boolean' ? result.liked : true,
+      likes: result.likes !== undefined ? Number(result.likes) || 0 : optimistic.likes,
+    };
+    gameList.value = replaceGameInList(gameList.value, game.id, patch);
+    homeGames.value = replaceGameInList(homeGames.value, game.id, patch);
+  } catch (error) {
+    const rollback = { liked: false, likes: previousLikes };
+    gameList.value = replaceGameInList(gameList.value, game.id, rollback);
+    homeGames.value = replaceGameInList(homeGames.value, game.id, rollback);
+    showApiStatusToast(error, {
+      401: '请先登录后再点赞',
+      default: '游戏点赞失败，请稍后重试',
+    });
+    if (error?.status === 401) openAuth();
   }
 }
 
@@ -281,8 +321,8 @@ async function loadHomeData() {
   homeStats.value = data.stats || homeStats.value;
   marketStats.value = {
     projects: data.stats?.projects || 0,
-    weeklyActive: 3214,
-    downloads: '847K',
+    weeklyActive: data.stats?.weeklyActive || 0,
+    downloads: data.stats?.downloads || '0',
     price: data.stats?.price || 0,
   };
   homeGames.value = data.latestGames || [];
@@ -362,8 +402,13 @@ async function downloadGameSource(game) {
 
 async function downloadSourceRepo(repo) {
   try {
-    await downloadRepo(repo.id);
-    showToast(`正在下载 ${repo.name}`);
+    const result = await downloadRepo(repo.id);
+    if (result.downloadUrl) {
+      window.open(resolveBackendUrl(result.downloadUrl), '_blank', 'noopener');
+      showToast(`正在下载 ${repo.name}`);
+      return;
+    }
+    showToast('源码项目下载地址不存在');
   } catch {
     showToast('源码项目暂时无法下载');
   }
@@ -564,6 +609,7 @@ watch(isAdmin, (allowed) => {
         @upload="uploadOpen = true"
         @play-game="openPlayer"
         @source="downloadGameSource"
+        @like-game="handleLikeGame"
         @like-post="likePost"
         @notice="showToast"
         @request-auth="openAuth"
@@ -574,6 +620,7 @@ watch(isAdmin, (allowed) => {
         :games="gameList"
         @play-game="openPlayer"
         @download-source="downloadGameSource"
+        @like-game="handleLikeGame"
       />
       <ForumPage
         v-else-if="activeView === 'forum'"

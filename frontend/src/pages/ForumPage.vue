@@ -29,19 +29,6 @@ defineProps({
   },
 });
 
-const pinnedPost = {
-  ava: '◆',
-  bg: 'var(--gradient-3)',
-  name: '吧务 · PIXEL FORGE 官方',
-  tags: ['置顶'],
-  title: '【吧规】发帖必读：晒作品、求帮助、找队友都到这里来',
-  excerpt: '发布游戏请附截图和介绍；求助和招募请标注分类；开源作品请注明协议。',
-  replies: '108',
-  views: '9.8k',
-  likes: 999,
-  liked: true,
-};
-
 const emit = defineEmits(['update:activeForumCat', 'update:activeBar', 'notice', 'create-post', 'like-post', 'request-auth', 'reply-created']);
 
 function selectBar(bar) {
@@ -62,7 +49,7 @@ function selectBar(bar) {
       <div class="info">
         <h2>{{ activeBar.name }} <span>贴吧 · 官方区</span></h2>
         <div class="sub">{{ activeBar.desc }}</div>
-        <div class="stats"><div><b>{{ activeBar.posts }}</b><span>帖子</span></div><div><b>{{ activeBar.members }}</b><span>吧友</span></div><div><b>3,847</b><span>在线</span></div><div><b>96</b><span>吧务</span></div></div>
+        <div class="stats"><div><b>{{ activeBar.posts }}</b><span>帖子</span></div><div><b>{{ activeBar.members }}</b><span>吧友</span></div><div><b>{{ activeBar.online || 0 }}</b><span>在线</span></div><div><b>{{ activeBar.moderators || 0 }}</b><span>吧务</span></div></div>
       </div>
     </div>
     <div class="container forum-layout">
@@ -70,7 +57,6 @@ function selectBar(bar) {
         <div class="forum-cats">
           <button v-for="cat in forumCats" :key="cat" class="cat-btn" :class="{ active: activeForumCat === cat }" @click="emit('update:activeForumCat', cat)">{{ cat }}</button>
         </div>
-        <PostItem :post="pinnedPost" :current-user="currentUser" pinned />
         <div v-if="forumPosts.length" class="post-list">
           <PostItem
             v-for="post in forumPosts"

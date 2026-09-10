@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue';
-import { deleteDeveloperGame, getDeveloperCenter, getDeveloperGames, resubmitDeveloperGame, urgeDeveloperGameReview } from '../api';
+import { deleteDeveloperGame, getDeveloperCenter, getDeveloperGames, resubmitDeveloperGame, updateDeveloperProfile, uploadDeveloperAvatar, urgeDeveloperGameReview } from '../api';
 import StateBlock from '../components/StateBlock.vue';
 
 const props = defineProps({
@@ -29,6 +29,11 @@ const loading = ref(false);
 const actionLoadingId = ref('');
 const errorText = ref('');
 const profile = ref(null);
+const editOpen = ref(false);
+const editSaving = ref(false);
+const avatarUploading = ref(false);
+const avatarInput = ref(null);
+const editForm = ref({ bio: '', location: '', engines: '' });
 const stats = ref({
   following: '—',
   followers: '—',
@@ -222,6 +227,73 @@ async function deleteWork(work) {
   }
 }
 
+function openProfileEditor() {
+  if (!props.currentUser) {
+    emit('request-auth');
+    emit('notice', '请先登录后再编辑资料');
+    return;
+  }
+
+  editForm.value = {
+    bio: displayProfile.value.bio || '',
+    location: displayProfile.value.location || '',
+    engines: (displayProfile.value.engines || []).join(' / '),
+  };
+  editOpen.value = true;
+}
+
+async function saveProfile() {
+  editSaving.value = true;
+  try {
+    const updated = await updateDeveloperProfile({
+      bio: editForm.value.bio.trim(),
+      location: editForm.value.location.trim(),
+      engines: editForm.value.engines.split(/[\/,，\s]+/).map((item) => item.trim()).filter(Boolean),
+    });
+    profile.value = updated;
+    editOpen.value = false;
+    emit('notice', '开发者资料已更新');
+  } catch (error) {
+    emit('notice', error?.message || '资料保存失败');
+  } finally {
+    editSaving.value = false;
+  }
+}
+
+function requestAvatarUpload() {
+  if (!props.currentUser) {
+    emit('request-auth');
+    emit('notice', '请先登录后再上传头像');
+    return;
+  }
+  avatarInput.value?.click();
+}
+
+async function changeAvatar(event) {
+  const [file] = event.target.files || [];
+  event.target.value = '';
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    emit('notice', '头像必须是图片文件');
+    return;
+  }
+  if (file.size > 2 * 1024 * 1024) {
+    emit('notice', '头像不能超过 2 MB');
+    return;
+  }
+
+  avatarUploading.value = true;
+  try {
+    const avatarUrl = await uploadDeveloperAvatar(file);
+    profile.value = { ...displayProfile.value, avatarUrl };
+    emit('notice', '头像已更新');
+  } catch (error) {
+    emit('notice', error?.message || '头像上传失败');
+  } finally {
+    avatarUploading.value = false;
+  }
+}
+
 function selectDoc(key) {
   emit('update:activeDocKey', key);
 }
@@ -263,6 +335,9 @@ watch(() => props.refreshKey, loadCenter);
             </div>
           </div>
           <div class="pb-actions">
+            <input ref="avatarInput" class="sr-only-file" type="file" accept="image/*" @change="changeAvatar">
+            <button class="btn btn-ghost" type="button" :disabled="avatarUploading" @click="requestAvatarUpload">{{ avatarUploading ? '上传中...' : '更换头像' }}</button>
+            <button class="btn btn-ghost" type="button" @click="openProfileEditor">编辑资料</button>
             <button class="btn btn-primary" type="button" @click="requestUpload"><span>＋</span>上传新作品</button>
           </div>
         </div>
@@ -363,6 +438,35 @@ watch(() => props.refreshKey, loadCenter);
       </div>
       <div v-else>
         <StateBlock icon="文" title="开发者内容加载中" text="开发者中心内容会通过接口提供，当前暂无可展示数据。" />
+      </div>
+    </div>
+
+    <div v-if="editOpen" class="modal-bg" @click.self="!editSaving && (editOpen = false)">
+      <div class="modal dev-edit-modal" role="dialog" aria-modal="true" aria-labelledby="dev-edit-title">
+        <div class="modal-head">
+          <h3 id="dev-edit-title">编辑开发者资料</h3>
+          <button class="icon-btn" type="button" :disabled="editSaving" @click="editOpen = false">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="field">
+            <label for="dev-bio">个人简介</label>
+            <textarea id="dev-bio" v-model="editForm.bio" maxlength="240" placeholder="介绍你的开发方向、代表作品或正在研究的玩法..." />
+          </div>
+          <div class="field">
+            <label for="dev-location">所在地</label>
+            <input id="dev-location" v-model="editForm.location" maxlength="40" placeholder="例如：上海" />
+          </div>
+          <div class="field">
+            <label for="dev-engines">常用引擎</label>
+            <input id="dev-engines" v-model="editForm.engines" maxlength="120" placeholder="例如：Godot 4 / Unity / Phaser" />
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" type="button" :disabled="editSaving" @click="editOpen = false">取消</button>
+          <button class="btn btn-primary" type="button" :disabled="editSaving" @click="saveProfile">
+            <span v-if="editSaving" class="auth-spinner"></span>{{ editSaving ? '保存中...' : '保存资料' }}
+          </button>
+        </div>
       </div>
     </div>
   </section>
@@ -551,6 +655,18 @@ watch(() => props.refreshKey, loadCenter);
 .pb-actions {
   gap: 10px;
   padding-bottom: 6px;
+}
+
+.sr-only-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.dev-edit-modal {
+  max-width: 560px;
 }
 
 .dash-strip {

@@ -134,6 +134,12 @@ type ForumPost struct {
 	Status  string   `json:"status"`
 }
 
+type ForumPostFilter struct {
+	Cat    string
+	BarID  int64
+	UserID int64
+}
+
 type Repo struct {
 	ID          int64  `json:"id"`
 	Icon        string `json:"icon"`
@@ -220,6 +226,31 @@ func (s *Store) Posts() []ForumPost {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]ForumPost(nil), s.posts...)
+}
+
+func (s *Store) ForumPosts(filter ForumPostFilter) []ForumPost {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cat := strings.TrimSpace(filter.Cat)
+	result := make([]ForumPost, 0, len(s.posts))
+	for _, item := range s.posts {
+		if item.Status != "published" {
+			continue
+		}
+		if cat != "" && item.Cat != cat {
+			continue
+		}
+		if filter.BarID > 0 && item.BarID != filter.BarID {
+			continue
+		}
+		if filter.UserID > 0 {
+			item.Liked = s.postLikes[item.ID][filter.UserID]
+		} else {
+			item.Liked = false
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 func (s *Store) HotPosts() []ForumPost {
@@ -568,7 +599,7 @@ func (s *Store) AddPost(author, title, cat, content string, tags []string, barID
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	item := ForumPost{ID: s.nextPostID, Ava: strings.ToUpper(string([]rune(author)[0])), BG: "linear-gradient(135deg,#06B6D4,#3B82F6)", Name: author, Level: "lv1", Time: "刚刚", Cat: strings.TrimSpace(cat), Tags: append([]string(nil), tags...), Title: title, Excerpt: content, Replies: "0", Views: "0", BarID: barID, Status: "pending"}
+	item := ForumPost{ID: s.nextPostID, Ava: strings.ToUpper(string([]rune(author)[0])), BG: "linear-gradient(135deg,#06B6D4,#3B82F6)", Name: author, Level: "lv1", Time: "刚刚", Cat: strings.TrimSpace(cat), Tags: append([]string(nil), tags...), Title: title, Excerpt: content, Replies: "0", Views: "0", BarID: barID, Status: "published"}
 	s.nextPostID++
 	s.posts = append(s.posts, item)
 	return item, nil

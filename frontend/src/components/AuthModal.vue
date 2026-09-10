@@ -197,7 +197,7 @@ async function socialLogin(provider) {
           </div>
           <div class="auth-row">
             <label class="auth-check"><input v-model="rememberMe" type="checkbox" /> 记住我</label>
-            <button type="button" class="auth-link" @click="emit('notice', '重置密码邮件已发送')">忘记密码？</button>
+            <button type="button" class="auth-link" @click="emit('notice', '找回密码功能暂未开放')">忘记密码？</button>
           </div>
           <button class="btn btn-primary auth-submit" type="submit" :disabled="loading">
             <span v-if="loading" class="auth-spinner"></span>{{ loading ? '登录中...' : '登录' }}

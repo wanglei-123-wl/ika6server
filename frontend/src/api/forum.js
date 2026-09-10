@@ -1,5 +1,5 @@
 import { ApiError, request } from './http';
-import { normalizeBar, normalizePage, normalizePost, normalizeReply } from './normalizers';
+import { normalizeBar, normalizeDownload, normalizePage, normalizePost, normalizeReply } from './normalizers';
 
 export async function getForumBars() {
   const result = await request('/api/forum/bars');
@@ -65,4 +65,24 @@ export async function createForumReply(postId, payload) {
     }
   }
   return normalizeReply(result);
+}
+
+export function uploadForumPostFile(postId, file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  return request(`/api/forum/posts/${postId}/files`, { method: 'POST', body: formData });
+}
+
+export async function getForumPostFiles(postId) {
+  const result = await request(`/api/forum/posts/${postId}/files`);
+  return normalizePage(result, (item) => ({
+    id: item?.id || item?.fileId || item?.file_id || '',
+    name: item?.originalName || item?.original_name || item?.name || '附件',
+    size: item?.size || item?.bytes || 0,
+    downloadUrl: item?.downloadUrl || item?.download_url || '',
+  }));
+}
+
+export async function downloadForumPostFile(postId, fileId) {
+  return normalizeDownload(await request(`/api/forum/posts/${postId}/files/${fileId}`));
 }

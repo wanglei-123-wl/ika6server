@@ -4,11 +4,13 @@ import {
   banUser,
   getAdminDashboard,
   getAdminGames,
+  getAdminPosts,
   getAdminReports,
   getAdminUsers,
   getAuditLogs,
   resolveAdminReport,
   reviewGame,
+  reviewPost,
   unbanUser,
 } from '../api';
 import StateBlock from '../components/StateBlock.vue';
@@ -50,6 +52,12 @@ const reportsPageSize = ref(20);
 const reportsTotal = ref(0);
 const reportsLoading = ref(false);
 const reportsError = ref('');
+const posts = ref([]);
+const postsPage = ref(1);
+const postsPageSize = ref(20);
+const postsTotal = ref(0);
+const postsLoading = ref(false);
+const postsError = ref('');
 const rejectOpen = ref(false);
 const rejectTarget = ref(null);
 const rejectReason = ref('包含未授权素材（图片 / 音乐 / 字体）');
@@ -94,6 +102,7 @@ const todayNewWorks = computed(() => {
 const userPageCount = computed(() => Math.max(1, Math.ceil(usersTotal.value / usersPageSize.value)));
 const auditPageCount = computed(() => Math.max(1, Math.ceil(auditTotal.value / auditPageSize.value)));
 const reportPageCount = computed(() => Math.max(1, Math.ceil(reportsTotal.value / reportsPageSize.value)));
+const postPageCount = computed(() => Math.max(1, Math.ceil(postsTotal.value / postsPageSize.value)));
 
 const panelTabs = computed(() => [
   { key: 'queue', label: '审核队列', count: pendingGames.value.length },
@@ -214,17 +223,33 @@ async function loadReports(page = reportsPage.value) {
     reportsTotal.value = result.total;
   } catch (error) {
     reports.value = [];
-    reportsError.value = error?.status === 404
-      ? '后端举报处理接口暂未实现'
-      : (error?.message || '举报列表加载失败');
+    reportsError.value = error?.message || '举报列表加载失败';
   } finally {
     reportsLoading.value = false;
+  }
+}
+
+async function loadAdminPosts(page = postsPage.value) {
+  if (!props.isAdmin) return;
+  postsLoading.value = true;
+  postsError.value = '';
+  try {
+    const result = await getAdminPosts(page, postsPageSize.value, 'pending');
+    posts.value = result.items;
+    postsPage.value = result.page;
+    postsTotal.value = result.total;
+  } catch (error) {
+    posts.value = [];
+    postsError.value = error?.message || '待审核帖子加载失败';
+  } finally {
+    postsLoading.value = false;
   }
 }
 
 async function switchPanel(key) {
   activePanel.value = key;
   if (key === 'users') await loadAdminUsers(1);
+  if (key === 'posts') await loadAdminPosts(1);
   if (key === 'reports') await loadReports(1);
 }
 
@@ -355,13 +380,29 @@ async function resolveReport(report) {
   }
 }
 
+async function updatePostStatus(post, status) {
+  const message = status === 'approved' ? `已通过「${post.title}」` : `已驳回「${post.title}」`;
+  actionLoadingId.value = `post-${status}-${post.id}`;
+  try {
+    await reviewPost(post.id, { status, reason: status === 'approved' ? '符合社区规则' : '不符合社区规则' });
+    emit('notice', message);
+    await loadAdminPosts(postsPage.value);
+    await loadAdminData();
+  } catch (error) {
+    emit('notice', error?.message || '帖子审核失败');
+  } finally {
+    actionLoadingId.value = '';
+  }
+}
+
 function changePage(type, direction) {
-  const page = type === 'users' ? usersPage.value : type === 'audit' ? auditPage.value : reportsPage.value;
-  const last = type === 'users' ? userPageCount.value : type === 'audit' ? auditPageCount.value : reportPageCount.value;
+  const page = type === 'users' ? usersPage.value : type === 'audit' ? auditPage.value : type === 'posts' ? postsPage.value : reportsPage.value;
+  const last = type === 'users' ? userPageCount.value : type === 'audit' ? auditPageCount.value : type === 'posts' ? postPageCount.value : reportPageCount.value;
   const next = Math.min(last, Math.max(1, page + direction));
   if (next === page) return;
   if (type === 'users') loadAdminUsers(next);
   if (type === 'audit') loadAuditLogs(next);
+  if (type === 'posts') loadAdminPosts(next);
   if (type === 'reports') loadReports(next);
 }
 
@@ -548,7 +589,37 @@ watch(() => props.isAdmin, (isAdmin) => {
       </div>
 
       <div v-else-if="activePanel === 'posts'" class="admin-panel-list">
-        <StateBlock icon="帖" title="待审核帖子列表尚未接通" text="后端当前只有帖子审核动作接口，没有提供管理员读取待审核帖子列表的接口。" />
+        <div class="adm-toolbar">
+          <span>待审核帖子 <b>{{ postsTotal }}</b></span>
+          <span v-if="postPageCount > 1">第 {{ postsPage }} / {{ postPageCount }} 页</span>
+          <button class="game-act-btn" type="button" :disabled="postsLoading" @click="loadAdminPosts(postsPage)">刷新</button>
+        </div>
+        <StateBlock v-if="postsLoading" icon="载" title="正在加载帖子" text="正在从服务器读取待审核帖子。" />
+        <StateBlock v-else-if="postsError" icon="错" title="帖子列表加载失败" :text="postsError" />
+        <div v-else-if="posts.length" class="adm-list">
+          <article v-for="post in posts" :key="post.id" class="adm-row">
+            <div class="adm-info">
+              <div class="adm-title">{{ post.title }} <span class="adm-tag tag-pending">{{ post.status }}</span></div>
+              <div class="adm-meta">
+                <span>作者 <b>@{{ post.author }}</b></span>
+                <span>回复 {{ post.replyCount }}</span>
+                <span>浏览 {{ post.views }}</span>
+                <span>提交于 {{ formatDateTime(post.createdAt) }}</span>
+              </div>
+              <div class="adm-ban-note">{{ post.content }}</div>
+            </div>
+            <div class="adm-actions">
+              <button class="btn btn-success btn-sm" type="button" :disabled="actionLoadingId === `post-approved-${post.id}`" @click="updatePostStatus(post, 'approved')">通过</button>
+              <button class="btn btn-danger btn-sm" type="button" :disabled="actionLoadingId === `post-rejected-${post.id}`" @click="updatePostStatus(post, 'rejected')">驳回</button>
+            </div>
+          </article>
+        </div>
+        <StateBlock v-else icon="帖" title="暂无待审核帖子" text="服务器当前没有返回待审核帖子。" />
+        <div v-if="!postsLoading && !postsError && postPageCount > 1" class="adm-pagination">
+          <button class="btn btn-ghost btn-sm" type="button" :disabled="postsPage <= 1" @click="changePage('posts', -1)">上一页</button>
+          <span>{{ postsPage }} / {{ postPageCount }}</span>
+          <button class="btn btn-ghost btn-sm" type="button" :disabled="postsPage >= postPageCount" @click="changePage('posts', 1)">下一页</button>
+        </div>
       </div>
 
       <div v-else class="admin-panel-list">

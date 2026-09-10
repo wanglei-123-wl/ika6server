@@ -6,7 +6,7 @@ defineProps({
   },
 });
 
-const emit = defineEmits(['play', 'source']);
+const emit = defineEmits(['play', 'source', 'like']);
 </script>
 
 <template>
@@ -34,7 +34,7 @@ const emit = defineEmits(['play', 'source']);
       </div>
       <div class="game-stats">
         <span class="stat">▶ {{ game.plays }}</span>
-        <span class="stat">♥ {{ game.likes }}</span>
+        <button class="game-like-btn" :class="{ liked: game.liked }" type="button" :disabled="game.liked" @click.stop="emit('like', game)">♥ {{ game.likes }}</button>
         <div class="game-actions">
           <button class="game-act-btn play" @click.stop="emit('play', game)">试玩</button>
           <button v-if="game.hasSource" class="game-act-btn" @click.stop="emit('source', game)">源码</button>

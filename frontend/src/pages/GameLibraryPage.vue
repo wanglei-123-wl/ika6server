@@ -8,7 +8,7 @@ defineProps({
   },
 });
 
-const emit = defineEmits(['play-game', 'download-source']);
+const emit = defineEmits(['play-game', 'download-source', 'like-game']);
 </script>
 
 <template>
@@ -31,6 +31,7 @@ const emit = defineEmits(['play-game', 'download-source']);
         </div>
         <div class="list-meta">
           <span>▶ {{ game.plays }}</span>
+          <button class="game-like-btn" :class="{ liked: game.liked }" type="button" :disabled="game.liked" @click.stop="emit('like-game', game)">♥ {{ game.likes }}</button>
           <button class="game-act-btn play" @click.stop="emit('play-game', game)">试玩</button>
           <button v-if="game.hasSource" class="game-act-btn" @click.stop="emit('download-source', game)">下载</button>
         </div>

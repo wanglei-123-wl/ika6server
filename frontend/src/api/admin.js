@@ -90,6 +90,19 @@ function normalizeAdminReport(raw = {}) {
   };
 }
 
+function normalizeAdminPost(raw = {}) {
+  return {
+    id: pick(raw, ['id', 'postId', 'post_id'], ''),
+    title: pick(raw, ['title', 'subject'], '无标题帖子'),
+    author: pick(raw, ['author', 'authorName', 'author_name', 'username'], 'unknown'),
+    content: pick(raw, ['content', 'excerpt', 'summary'], ''),
+    status: pick(raw, ['status'], 'pending'),
+    createdAt: pick(raw, ['createdAt', 'created_at'], ''),
+    replyCount: Number(pick(raw, ['replyCount', 'reply_count', 'replies'], 0)),
+    views: Number(pick(raw, ['views', 'viewCount', 'view_count'], 0)),
+  };
+}
+
 export async function getAdminDashboard() {
   return normalizeAdminDashboard(await request('/api/admin/dashboard'));
 }
@@ -104,6 +117,10 @@ export function reviewGame(id, payload) {
 
 export function reviewPost(id, payload) {
   return request(`/api/admin/posts/${id}/review`, { method: 'POST', body: payload });
+}
+
+export async function getAdminPosts(page = 1, pageSize = 20, status = 'pending') {
+  return normalizePage(await request('/api/admin/posts', { params: { page, pageSize, status } }), normalizeAdminPost);
 }
 
 export function banUser(id, payload) {

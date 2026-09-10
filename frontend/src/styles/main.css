@@ -1043,6 +1043,22 @@ button {
   background: var(--gradient-2);
 }
 
+.game-like-btn {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-3);
+  background: transparent;
+  font-size: 12px;
+}
+
+.game-like-btn:hover:not(:disabled),
+.game-like-btn.liked {
+  border-color: rgba(244, 63, 94, 0.42);
+  color: #fb7185;
+  background: rgba(244, 63, 94, 0.08);
+}
+
 .panel,
 .upload-cta,
 .repo-card,
@@ -1470,6 +1486,10 @@ button {
 .comment-more-btn:disabled {
   cursor: wait;
   opacity: 0.7;
+}
+
+.top-more {
+  margin-left: 50px;
 }
 
 .comment-children {
@@ -2090,6 +2110,45 @@ button {
   font-weight: 800;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.post-file-zone {
+  position: relative;
+  grid-template-columns: auto 1fr;
+  place-items: center stretch;
+  min-height: 96px;
+  padding: 18px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.post-file-zone input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.post-file-zone .t {
+  color: var(--text);
+  font-weight: 800;
+}
+
+.file-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.file-chip {
+  max-width: 100%;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-2);
+  background: var(--surface-2);
+  font-size: 12px;
 }
 
 .upload-progress {

@@ -206,6 +206,25 @@ func (s *Store) RemoveOwner(ownerID int64) {
 	}
 }
 
+func (s *Store) RemoveOwnerKinds(ownerID int64, kinds ...string) {
+	s.mu.Lock()
+	var storedNames []string
+	for _, kind := range kinds {
+		key := uploadKey(ownerID, kind)
+		file, ok := s.byKey[key]
+		if !ok {
+			continue
+		}
+		storedNames = append(storedNames, file.StoredName)
+		delete(s.byKey, key)
+	}
+	s.mu.Unlock()
+
+	for _, storedName := range storedNames {
+		_ = os.Remove(filepath.Join(s.uploadDir, storedName))
+	}
+}
+
 func uploadKey(ownerID int64, kind string) string {
 	return fmt.Sprintf("%d:%s", ownerID, strings.ToLower(strings.TrimSpace(kind)))
 }

@@ -689,7 +689,7 @@ func (a *app) handleDeveloperDeleteGame(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if a.files != nil {
-		a.files.RemoveOwner(id)
+		a.files.RemoveOwnerKinds(id, "cover", "build", "source")
 	}
 	if a.play != nil {
 		_ = a.play.Remove(id)
@@ -863,7 +863,7 @@ func (a *app) handleCreateGame(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) removeCreatedGame(id int64) {
 	if a.files != nil {
-		a.files.RemoveOwner(id)
+		a.files.RemoveOwnerKinds(id, "cover", "build", "source")
 	}
 	if a.play != nil {
 		_ = a.play.Remove(id)
@@ -970,6 +970,11 @@ func (a *app) handleGameFile(w http.ResponseWriter, r *http.Request) {
 	if kind != "cover" && kind != "build" && kind != "source" {
 		writeError(w, http.StatusBadRequest, "invalid file kind")
 		return
+	}
+	if kind == "source" {
+		if _, ok := a.currentUser(w, r); !ok {
+			return
+		}
 	}
 	var (
 		file   files.File
@@ -1162,8 +1167,19 @@ func (a *app) handleForumBars(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleForumPosts(w http.ResponseWriter, r *http.Request) {
+	user, authenticated, ok := a.optionalCurrentUser(w, r)
+	if !ok {
+		return
+	}
+	filter := catalog.ForumPostFilter{
+		Cat:   r.URL.Query().Get("cat"),
+		BarID: int64(positiveInt(r.URL.Query().Get("barId"), 0)),
+	}
+	if authenticated {
+		filter.UserID = user.ID
+	}
 	if a.sqlCatalog != nil {
-		items, err := a.sqlCatalog.ForumPosts(r.Context())
+		items, err := a.sqlCatalog.ForumPosts(r.Context(), filter)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load forum posts")
 			return
@@ -1171,7 +1187,7 @@ func (a *app) handleForumPosts(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusOK, paginate(items, r))
 		return
 	}
-	writeAPI(w, http.StatusOK, paginate(publishedPosts(a.catalog.Posts()), r))
+	writeAPI(w, http.StatusOK, paginate(a.catalog.ForumPosts(filter), r))
 }
 
 func (a *app) handleForumPost(w http.ResponseWriter, r *http.Request) {

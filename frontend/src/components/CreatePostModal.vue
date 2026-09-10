@@ -19,6 +19,7 @@ const form = reactive({
   cat: '作品发布',
   tags: '',
   content: '',
+  files: [],
 });
 const errors = ref({});
 
@@ -27,7 +28,19 @@ function reset() {
   form.cat = '作品发布';
   form.tags = '';
   form.content = '';
+  form.files = [];
   errors.value = {};
+}
+
+function readableSize(file) {
+  if (!file) return '';
+  if (file.size >= 1024 * 1024) return `${(file.size / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(file.size / 1024))} KB`;
+}
+
+function setFiles(event) {
+  form.files = Array.from(event.target.files || []);
+  errors.value = { ...errors.value, files: '' };
 }
 
 watch(() => props.show, (visible) => {
@@ -39,6 +52,8 @@ function validate() {
 
   if (form.title.trim().length < 4) nextErrors.title = '标题至少 4 个字符';
   if (form.content.trim().length < 12) nextErrors.content = '正文至少 12 个字符';
+  if (form.files.length > 5) nextErrors.files = '附件最多上传 5 个';
+  if (form.files.some((file) => file.size > 50 * 1024 * 1024)) nextErrors.files = '单个附件不能超过 50 MB';
 
   errors.value = nextErrors;
   return Object.keys(nextErrors).length === 0;
@@ -56,6 +71,7 @@ function submit() {
     cat: form.cat,
     tags: form.tags.split(/[,，\s]+/).map((tag) => tag.trim()).filter(Boolean),
     content: form.content.trim(),
+    files: form.files,
   });
 }
 </script>
@@ -73,7 +89,7 @@ function submit() {
           <span>帖</span>
           <div>
             <strong>发到社区论坛</strong>
-            <p>后端接通后，这里会创建真实帖子并进入对应游戏吧或分类。</p>
+            <p>帖子会发布到当前游戏吧；如选择附件，正文发布成功后会继续上传附件。</p>
           </div>
         </div>
 
@@ -104,6 +120,22 @@ function submit() {
           <label for="forum-post-content">正文内容</label>
           <textarea id="forum-post-content" v-model="form.content" placeholder="写清楚玩法、截图说明、求助问题或招募要求..." />
           <span v-if="errors.content" class="auth-error">{{ errors.content }}</span>
+        </div>
+
+        <div class="field" :class="{ invalid: errors.files }">
+          <label for="forum-post-files">帖子附件</label>
+          <label class="drop-zone post-file-zone" for="forum-post-files">
+            <input id="forum-post-files" type="file" multiple @change="setFiles" />
+            <div class="ico">附</div>
+            <div>
+              <div class="t">{{ form.files.length ? `已选择 ${form.files.length} 个附件` : '上传附件，可选' }}</div>
+              <div class="s">支持图片、压缩包或文档；最多 5 个，单个 50 MB</div>
+            </div>
+          </label>
+          <div v-if="form.files.length" class="file-chip-row">
+            <span v-for="file in form.files" :key="`${file.name}-${file.size}`" class="file-chip">{{ file.name }} · {{ readableSize(file) }}</span>
+          </div>
+          <span v-if="errors.files" class="auth-error">{{ errors.files }}</span>
         </div>
       </div>
 

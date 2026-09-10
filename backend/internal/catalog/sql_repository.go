@@ -150,7 +150,12 @@ func (r *SQLRepository) ReviewGame(ctx context.Context, gameID int64, status, re
 	if status == "rejected" {
 		reviewReason = strings.TrimSpace(reason)
 	}
-	result, err := r.db.ExecContext(ctx, `UPDATE games SET status = $1, review_reason = $2, updated_at = now() WHERE id = $3`, status, reviewReason, gameID)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE games SET status = $1, review_reason = $2, updated_at = now() WHERE id = $3`, status, reviewReason, gameID)
 	if err != nil {
 		return err
 	}
@@ -159,19 +164,22 @@ func (r *SQLRepository) ReviewGame(ctx context.Context, gameID int64, status, re
 		return sql.ErrNoRows
 	}
 	if err == nil {
-		_, err = r.db.ExecContext(ctx, `UPDATE game_files SET status = $1 WHERE game_id = $2`, status, gameID)
+		_, err = tx.ExecContext(ctx, `UPDATE game_files SET status = $1 WHERE game_id = $2`, status, gameID)
 	}
 	if err == nil {
 		playStatus := "disabled"
 		if status == "published" {
 			playStatus = "ready"
 		}
-		_, err = r.db.ExecContext(ctx, `
+		_, err = tx.ExecContext(ctx, `
 			UPDATE game_play_deployments
 			SET status = $1, updated_at = now()
 			WHERE game_id = $2`, playStatus, gameID)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *SQLRepository) CreateForumPost(ctx context.Context, barID, authorID int64, title, category, content string, tags []string) (int64, error) {
@@ -184,16 +192,38 @@ func (r *SQLRepository) CreateForumPost(ctx context.Context, barID, authorID int
 		return 0, err
 	}
 	err = r.db.QueryRowContext(ctx, `
-		INSERT INTO forum_posts (bar_id, author_id, title, category, content, tags)
-		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+		INSERT INTO forum_posts (bar_id, author_id, title, category, content, tags, status)
+		VALUES ($1, $2, $3, $4, $5, $6, 'published') RETURNING id`,
 		barID, authorID, strings.TrimSpace(title), strings.TrimSpace(category), strings.TrimSpace(content), tagsJSON).Scan(&id)
 	return id, err
 }
 
-func (r *SQLRepository) ForumPosts(ctx context.Context) ([]ForumPost, error) {
-	rows, err := r.db.QueryContext(ctx, `
+func (r *SQLRepository) ForumPosts(ctx context.Context, filters ...ForumPostFilter) ([]ForumPost, error) {
+	filter := ForumPostFilter{}
+	if len(filters) > 0 {
+		filter = filters[0]
+	}
+	args := []any{}
+	where := []string{"p.status = 'published'"}
+	if strings.TrimSpace(filter.Cat) != "" {
+		args = append(args, strings.TrimSpace(filter.Cat))
+		where = append(where, "p.category = $"+strconv.Itoa(len(args)))
+	}
+	if filter.BarID > 0 {
+		args = append(args, filter.BarID)
+		where = append(where, "p.bar_id = $"+strconv.Itoa(len(args)))
+	}
+	likedExpr := "false"
+	if filter.UserID > 0 {
+		args = append(args, filter.UserID)
+		likedExpr = `EXISTS (
+			SELECT 1 FROM forum_post_likes l
+			WHERE l.post_id = p.id AND l.user_id = $` + strconv.Itoa(len(args)) + `
+		)`
+	}
+	query := `
 		SELECT p.id, u.username, p.category, p.title, p.content, p.tags,
-		       p.likes, p.views, p.bar_id, p.status, COALESCE(c.reply_count, 0)
+		       p.likes, p.views, p.bar_id, p.status, COALESCE(c.reply_count, 0), ` + likedExpr + `
 		FROM forum_posts p
 		JOIN users u ON u.id = p.author_id
 		LEFT JOIN (
@@ -201,13 +231,14 @@ func (r *SQLRepository) ForumPosts(ctx context.Context) ([]ForumPost, error) {
 			FROM comments
 			GROUP BY post_id
 		) c ON c.post_id = p.id
-		WHERE p.status = 'published'
-		ORDER BY p.created_at DESC, p.id DESC`)
+		WHERE ` + strings.Join(where, " AND ") + `
+		ORDER BY p.created_at DESC, p.id DESC`
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanForumPosts(rows)
+	return scanForumPostsWithLiked(rows)
 }
 
 func (r *SQLRepository) HotPosts(ctx context.Context) ([]ForumPost, error) {
@@ -1456,6 +1487,22 @@ func scanForumPosts(rows *sql.Rows) ([]ForumPost, error) {
 		var likes, views, replies int64
 		var tagsJSON []byte
 		if err := rows.Scan(&item.ID, &author, &item.Cat, &item.Title, &content, &tagsJSON, &likes, &views, &item.BarID, &item.Status, &replies); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(tagsJSON, &item.Tags)
+		items = append(items, forumPostFromRow(item, author, content, likes, views, replies))
+	}
+	return items, rows.Err()
+}
+
+func scanForumPostsWithLiked(rows *sql.Rows) ([]ForumPost, error) {
+	items := make([]ForumPost, 0)
+	for rows.Next() {
+		var item ForumPost
+		var author, content string
+		var likes, views, replies int64
+		var tagsJSON []byte
+		if err := rows.Scan(&item.ID, &author, &item.Cat, &item.Title, &content, &tagsJSON, &likes, &views, &item.BarID, &item.Status, &replies, &item.Liked); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(tagsJSON, &item.Tags)
